@@ -1,0 +1,18 @@
+# Child repositories — independent GitHub repos placed alongside on disk.
+# The group repo tracks ONLY the group-level docs + infra files.
+/sentin8-*/
+
+# Local environment (never commit secrets/DSNs)
+/.env
+.env.new-backup
+
+# Runtime + stray tooling residue (empty dir skeletons, never tracked)
+/.run/
+/.tmp/
+/sentin8/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
