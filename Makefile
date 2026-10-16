@@ -25,28 +25,41 @@ SERVICES := auth acme proxy bus db storage post stat secrets func cron flow ai s
 RELEASE ?=
 
 # ── Build identity stamps (BUILDID-1, sentin8-build-info README) ────────
-# Every cargo build through this Makefile is stamped with the repo's own
-# git short hash (SENTIN8_GIT_SHA) and the active cargo profile
+# Every cargo invocation through this Makefile is stamped with the repo's
+# own git short hash (SENTIN8_GIT_SHA) and the active cargo profile
 # (SENTIN8_BUILD_PROFILE), which sentin8-build-info bakes into the binary
 # via option_env! — banners and /v1/health then render
 # `{version}+{hash}[.d]` so operators can verify WHICH binary runs.
-# Cargo fingerprints option_env! values: a changed stamp invalidates the
-# affected crates, an unchanged stamp keeps builds Fresh. Packaging
-# (sentin8-packaging/debian/rules) sets its own stamps; ad-hoc cargo
-# builds stay unstamped (fallbacks: bare version + debug_assertions cfg).
 #
-# $(call stamp_env,repo_dir) resolves the stamps for one repo via its
-# own .git. A repo without .git (vendored/exported source) keeps an
-# EMPTY hash — sentin8-build-info omits the +hash part rather than
-# stamping a lie.
+# DELIVERY SHAPE (STATUSID-1): the stamps ride the SAME shell line as
+# the cargo command — make runs each recipe LINE in its own shell, so
+# the original multi-line `define` (an `export …` recipe line before the
+# cargo line) evaporated before cargo started and stamped NOTHING.
+# $(stamp_env,repo) expands to an env-PREFIX prepended to the command;
+# the `$$()` shell substitution (not make's `$(shell)`) keeps it working
+# inside recipe loops where the repo dir is a shell variable.
 #
-# Usage inside a recipe (exports into the recipe's environment):
-#	$(call stamp_env,sentin8-auth)
-#	@cd sentin8-auth && $(CARGO) build $(RELEASE)
-define stamp_env
-export SENTIN8_BUILD_PROFILE=$(if $(RELEASE),release,debug)
-export SENTIN8_GIT_SHA=$(shell git -C $(1) rev-parse --short HEAD 2>/dev/null)
-endef
+# EVERY cargo invocation is stamped — builds, tests, AND the
+# `cargo run` control paths (start/stop/status/enroll): cargo
+# fingerprints option_env!, so an unstamped `cargo run` would REBUILD
+# a freshly stamped binary back to an unstamped identity (flip-flop).
+# Packaging (sentin8-packaging/debian/rules) sets its own stamps; ad-hoc
+# cargo builds stay unstamped (fallbacks: bare version +
+# debug_assertions cfg).
+#
+# A repo without .git (vendored/exported source) keeps an EMPTY hash —
+# sentin8-build-info omits the +hash part rather than stamping a lie.
+#
+# Usage inside a recipe (prefix on the cargo command itself, AFTER the
+# cd into the repo — the hash resolves from the shell's cwd):
+#	@cd sentin8-auth && $(call stamp_env,sentin8-auth) $(CARGO) build $(RELEASE)
+# The hash resolves via PLAIN `git rev-parse` (no -C path): the stamp
+# expands on the same shell line AFTER the `cd`, so a repo-relative
+# `git -C <repo>` would resolve from INSIDE the repo and miss, stamping
+# every binary EMPTY (the first STATUSID-1 delivery did exactly that).
+# The call argument is documentary — it names the repo the stamp
+# applies to; the expansion itself is cwd-based.
+stamp_env = SENTIN8_BUILD_PROFILE=$(if $(RELEASE),release,debug) SENTIN8_GIT_SHA=$$(git rev-parse --short HEAD 2>/dev/null)
 
 # Absolute tree run dir (RS §4.5.1-2): run_dir() defaults to cwd-relative
 # ".run", so the CLI must not resolve the control socket/logs per cwd.
@@ -83,14 +96,14 @@ help: ## Show this help
 build: build-sdk build-starters build-services ## Build the group in DAG order (RELEASE=--release for release)
 
 build-sdk: ## Build the shared workspace (EVERYTHING depends on this)
-	$(call stamp_env,sentin8-sdk)
-	@cd sentin8-sdk && $(CARGO) build $(RELEASE) --workspace
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-sdk && $(call stamp_env,sentin8-sdk) $(CARGO) build $(RELEASE) --workspace
 
 build-starters: build-sdk ## Build cli + captain (before any service)
-	$(call stamp_env,sentin8-cli)
-	@cd sentin8-cli && $(CARGO) build $(RELEASE)
-	$(call stamp_env,sentin8-captain)
-	@cd sentin8-captain && $(CARGO) build $(RELEASE)
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) build $(RELEASE)
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-captain && $(call stamp_env,sentin8-captain) $(CARGO) build $(RELEASE)
 
 build-services: build-starters ## Build the 17 platform service repos
 	@for s in $(SERVICES); do \
@@ -100,12 +113,14 @@ build-services: build-starters ## Build the 17 platform service repos
 
 # build-one — one service repo with ITS OWN stamps (each repo carries its
 # own .git, so the hash is that repo's HEAD, not the group's). A recursive
-# make call (not a loop fragment) because stamp_env's $(shell git …)
-# evaluates at parse time against the given repo dir.
+# make call (not a loop fragment) because the stamp's `git -C $(1)`
+# resolves against the given repo dir. SQLX_OFFLINE=true pins the build
+# to the committed .sqlx offline caches (group DESIGN §3.2.2 — builds
+# never connect); the operator `.env` is sourced for the TLS/cert env.
 # Arguments: SERVICE=<repo-suffix> (e.g. SERVICE=auth), RELEASE as usual.
 build-one:
-	$(call stamp_env,sentin8-$(SERVICE))
-	@cd sentin8-$(SERVICE) && $(CARGO) build $(RELEASE)
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-$(SERVICE) && $(call stamp_env,sentin8-$(SERVICE)) $(CARGO) build $(RELEASE)
 
 # ── Fleet run ─────────────────────────────────────────────────────────────
 # Profile-agnostic: the default profile runs target/debug binaries,
@@ -121,16 +136,16 @@ start: ## Start the fleet via captain (RELEASE=--release for release; infra must
 	export SENTIN8_PG_POOL_MAX=$${SENTIN8_PG_POOL_MAX:-8}; \
 	set -a; . ../.env; set +a; \
 	eval "export $(RUNDIR_ENV)"; \
-	cd sentin8-cli && $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start
 
 stop: ## Stop the whole fleet (graceful; never pkill)
 	@set -a; . ../.env; set +a; \
 	eval "export $(RUNDIR_ENV)"; \
-	cd sentin8-cli && $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain stop
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain stop
 
 status: ## Fleet status (per-service instances, health, latency)
 	@eval "export $(RUNDIR_ENV)"; \
-	cd sentin8-cli && $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain services
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain services
 
 # Profile wrappers — make foo-release == RELEASE=--release make foo, and
 # make foo-debug == make foo (dev default). Any $(PROFILED) target takes
@@ -173,11 +188,11 @@ fleet-up: ## Multi-machine dev: infra + base fleet (docker backend ready)
 	set -a; . ../.env; set +a; \
 	eval "export $(RUNDIR_ENV)"; \
 	export SENTIN8_SERVICES="$${SENTIN8_SERVICES:-sentin8:acme,sentin8:auth,sentin8:proxy,sentin8:bus,sentin8:sys,sentin8:bff,sentin8:web}"; \
-	cd sentin8-cli && $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start
 
 enroll: ## Enroll every platform service repo (composable registration, RS §6)
 	@export SENTIN8_CAPTAIN_BINARY_PREFIX="$(BINARY_PREFIX)"; \
-	cd sentin8-cli && $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- vertical enroll \
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- vertical enroll \
 		../sentin8-captain \
 		../sentin8-auth ../sentin8-acme ../sentin8-proxy ../sentin8-bus \
 		../sentin8-db ../sentin8-storage ../sentin8-post ../sentin8-stat \
@@ -186,9 +201,12 @@ enroll: ## Enroll every platform service repo (composable registration, RS §6)
 		../sentin8-dash
 
 test: ## Run the SDK + starters test suites
-	@cd sentin8-sdk && $(CARGO) test --workspace
-	@cd sentin8-cli && $(CARGO) test
-	@cd sentin8-captain && $(CARGO) test
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-sdk && $(call stamp_env,sentin8-sdk) $(CARGO) test --workspace
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) test
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	cd sentin8-captain && $(call stamp_env,sentin8-captain) $(CARGO) test
 
 heads: ## Per-repo HEADs
 	@for d in */; do \
