@@ -35,9 +35,13 @@ services:
     # The Sentin8 fleet runs ~20 microservices against this one PostgreSQL
     # instance. Each service caps its pool at 3 connections (see
     # `sentin8_config::pg_pool`) plus a 3-connection `sentin8-tls` sync pool, so
-    # the steady-state sits comfortably under the limit. max_connections is
-    # bumped to 200 for headroom during reconnect bursts, and
-    # superuser_reserved_connections=5 guarantees operators can always run
+    # the steady-state sits comfortably under the limit. The FULL fleet
+    # (60 instances: 18 platform + 42 vertical service types, six
+    # vertical groups) can transiently hold ~6 connections per instance
+    # at boot, so the ceiling is sized for the whole-tree boot (observed
+    # 2026-10-17: 195/200 during a full fresh boot caused pool-timeout
+    # crash loops on the late spawners). superuser_reserved_connections
+    # guarantees operators can always run
     # diagnostics (psql) even if the fleet saturates the pool.
     #
     # ── PostgreSQL certificate identity (group DESIGN.md §3.2) ─────────
@@ -48,7 +52,7 @@ services:
     # vertical enroll` appends the per-workload rows).
     command: >
       postgres
-      -c max_connections=200
+      -c max_connections=600
       -c superuser_reserved_connections=5
       -c ssl=on
       -c ssl_cert_file=/tls/postgres-server.crt
