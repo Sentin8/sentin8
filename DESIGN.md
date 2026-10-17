@@ -1,4 +1,4 @@
-# DESIGN.md: sentin8/ Platform Group — Detailed Design
+# sentin8/ Platform Group — Detailed Design
 
 > **Audience**: maintainers and architects modifying the platform group.
 > For the overview read `README.md`; for business scope read `BUSINESS.md`.

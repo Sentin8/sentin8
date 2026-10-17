@@ -1,4 +1,4 @@
-# BUSINESS.md: sentin8/ Platform Group — Business Requirements & Functionality
+# sentin8/ Platform Group — Business Requirements & Functionality
 
 > Audience: product owners, business analysts, and anyone evaluating what
 > the platform group **does for the business**. For architecture read
