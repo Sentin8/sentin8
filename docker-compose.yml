@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright Contributors to the Sentin8
 # SPDX-License-Identifier: Apache-2.0
 
-# Sentin8 local development environment — Docker Compose.
+# Sentin8 local development environment - Docker Compose.
 # Stories 0.1.2: Docker Compose for local dev (PostgreSQL, Valkey).
 # Story 0.1.3: Sentin8:Sentin8:TLS is the reverse proxy with wildcard *.sentin8.local Sentin8:TLS.
 #
@@ -23,12 +23,12 @@
 
 services:
   # ── PostgreSQL ────────────────────────────────────────────────────────
-  # Certificate identity (group DESIGN.md §3.2): TLS-only, hostssl+cert —
+  # Certificate identity (group DESIGN.md §3.2): TLS-only, hostssl+cert -
   # the client certificate authenticates every TCP connection; there are
   # no database passwords. Role↔identity bindings are registration-driven
   # (pg_ident.conf rows appended by `sentin8-cli vertical enroll`).
   postgres:
-    # pgvector image (AI design §6 — hybrid retrieval; the plain postgres
+    # pgvector image (AI design §6 - hybrid retrieval; the plain postgres
     # image cannot provide the `vector` type sentin8-ai's schema needs).
     image: pgvector/pgvector:pg18
     container_name: sentin8-postgres
@@ -46,7 +46,7 @@ services:
     #
     # ── PostgreSQL certificate identity (group DESIGN.md §3.2) ─────────
     # TLS-ONLY: ssl=on with the Acme-issued server leaf, hostssl+cert
-    # rules in pg_hba.conf (no plaintext listener, no passwords — the
+    # rules in pg_hba.conf (no plaintext listener, no passwords - the
     # client certificate decides the connecting role through the pgm
     # identity map; `make infra-tls` writes the seed files, `sentin8-cli
     # vertical enroll` appends the per-workload rows).
@@ -63,12 +63,12 @@ services:
     # Runs as the HOST user (like the valkey service) so the 0600
     # infra-tls material minted by `make infra-tls` is readable: postgres
     # refuses a private key file with group/world bits. The pgdata volume
-    # must be owned by the same UID (dev data is disposable — recreate
+    # must be owned by the same UID (dev data is disposable - recreate
     # with `docker compose down -v` after changing this).
     user: "1000:1000"
     environment:
       POSTGRES_USER: sentin8
-      # Certificate identity (§3.2): the password field is never checked —
+      # Certificate identity (§3.2): the password field is never checked -
       # every TCP connection presents a client certificate (hostssl+cert).
       # POSTGRES_PASSWORD remains only because the image's initdb entrypoint
       # requires one to bootstrap the data directory; the HBA has no SCRAM
@@ -82,12 +82,12 @@ services:
     volumes:
       - sentin8-pgdata:/var/lib/postgresql/data/pgdata
       # The infra-tls material: server leaf + operator pair (0600, host
-      # UID — the container runs as the same user) + the public CA chain
+      # UID - the container runs as the same user) + the public CA chain
       # (client-cert verification needs ssl_ca_file pointing at the
       # Acme root+intermediate) + the seeded HBA/ident config files.
       # DIRECTORIES, never single files: a single-file bind mount pins
       # the inode, so the enroll pass's rewrite (new inode) would be
-      # invisible to the container — Postgres would keep reading the
+      # invisible to the container - Postgres would keep reading the
       # stale bootstrap-time map. Directory mounts propagate rewrites.
       - ../.run/secrets/infra-tls:/tls:ro
       - ../.run/secrets/acme-ca:/tls-ca:ro
@@ -101,13 +101,13 @@ services:
 
   # ── Valkey ─────────────────────────────────────────────────────────────
   # Certificate identity (group DESIGN.md §3.1): the data plane runs
-  # TLS-ONLY — `--port 0` disables the plaintext listener, `--tls-port`
+  # TLS-ONLY - `--port 0` disables the plaintext listener, `--tls-port`
   # serves with `tls-auth-clients yes` (no client cert, no connection).
   # Valkey 9 maps the client cert's CN to the ACL user of the same name
   # (`tls-auth-clients-user CN`); `vertical enroll` provisions per-workload
   # users. NO Valkey secrets anywhere. The server leaf + local control
   # pair live in ../.run/secrets/infra-tls, the public Root CA in
-  # ../.run/secrets/acme-ca (both materialized by `make infra-tls` —
+  # ../.run/secrets/acme-ca (both materialized by `make infra-tls` -
   # `sentin8-acme --ensure-infra-tls`, which must run before this
   # container starts). AOF persistence as before; used by Sentin8:Bus
   # (streams), Sentin8:BFF (sessions), Sentin8:Auth (protocol state),
@@ -116,7 +116,7 @@ services:
     image: valkey/valkey:9-alpine
     container_name: sentin8-valkey
     # Run as the HOST user so the 0600 TLS material (owner-only, minted by
-    # the operator's `make infra-tls`) is readable — the image's own
+    # the operator's `make infra-tls`) is readable - the image's own
     # `valkey` user has a different uid and would be locked out. Dev infra
     # runs single-user; the data volume is also owned by this uid.
     user: "1000:1000"

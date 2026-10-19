@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# clone-repos.sh — Clone all sentin8 sub-repositories into the workspace root.
+# clone-repos.sh - Clone all sentin8 sub-repositories into the workspace root.
 #
 # Usage (from /home/hamid/dev/sentin8.new):
 #   ./scripts/clone-repos.sh            # clones every repo
@@ -24,7 +24,7 @@ if [[ $# -eq 0 ]]; then
     done
 
     if [[ ${#NAMES[@]} -eq 0 ]]; then
-        # No pre-cloned repos — fall back to the known master list.
+        # No pre-cloned repos - fall back to the known master list.
         NAMES=(
             sentin8-acme sentin8-ai sentin8-app sentin8-auth sentin8-auth-ui
             sentin8-bff   sentin8-bus  sentin8-captain sentin8-ci sentin8-cli
@@ -49,7 +49,7 @@ for NAME in "${NAMES[@]}"; do
     REMOTE="https://github.com/${ORG}/${DIR}.git"
 
     if [[ -d "$WORKSPACE_ROOT/$DIR/.git" ]]; then
-        echo "✓  $DIR already cloned — skipping."
+        echo "✓  $DIR already cloned - skipping."
     else
         echo "→ Cloning $REMOTE ..."
         git clone "$REMOTE" "$WORKSPACE_ROOT/$DIR" || { echo "✗  failed: $DIR"; continue; }
