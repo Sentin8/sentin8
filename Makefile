@@ -84,7 +84,7 @@ BINARY_PREFIX = $(subst $(space),:,$(foreach d,$(shell for d in sentin8-* ; do [
 space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-one start stop status \
-	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test heads
+	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads
 
 help: ## Show this help
 	@echo "sentin8/ platform group"
@@ -224,6 +224,14 @@ test: ## Run the SDK + starters test suites
 	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) test
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
 	cd sentin8-captain && $(call stamp_env,sentin8-captain) $(CARGO) test
+
+test-openapi: ## Run every platform drift-guard test (OAPEC §4.8 — the nightly's router↔spec sweep)
+	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
+	for d in sentin8-*; do \
+		[ -f "$$d/tests/openapi_drift.rs" ] || continue; \
+		echo "==> drift-guard: $$d"; \
+		(cd $$d && $(call stamp_env,$$d) $(CARGO) test --test openapi_drift) || exit 1; \
+	done
 
 heads: ## Per-repo HEADs
 	@for d in */; do \
