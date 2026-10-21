@@ -84,7 +84,8 @@ BINARY_PREFIX = $(subst $(space),:,$(foreach d,$(shell for d in sentin8-* ; do [
 space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-one start stop status \
-	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads
+	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
+	conformance-up conformance-down conformance-purge conformance-seed
 
 help: ## Show this help
 	@echo "sentin8/ platform group"
@@ -232,6 +233,28 @@ test-openapi: ## Run every platform drift-guard test (OAPEC §4.8 — the nightl
 		echo "==> drift-guard: $$d"; \
 		(cd $$d && $(call stamp_env,$$d) $(CARGO) test --test openapi_drift) || exit 1; \
 	done
+
+# ── OIDF conformance rig (sentin8-auth DESIGN §9a) ───────────────────
+# The free, local OIDF suite run: cert tenant seeding + all profile
+# plans except the two design exclusions (Front-Channel Logout,
+# Implicit/Hybrid OP). Runbook: scripts/conformance/README.md.
+
+conformance-up: ## Start the OIDF conformance suite stack (mongo + server + nginx at :8443)
+	# Bake the platform root CA into the suite server image's JVM truststore
+	# (copied into the build context by this target; the derived image
+	# imports it with keytool - a bind mount alone does not reach the JVM).
+	cp -f ../.run/secrets/acme-ca/root-ca.crt scripts/conformance/root-ca.crt
+	docker compose -f scripts/conformance/docker-compose.yml up -d --build
+	@echo "suite UI: https://localhost.emobix.co.uk:8443/ (alias sentin8-local)"
+
+conformance-down: ## Stop the suite stack (keeps the mongo volume)
+	docker compose -f scripts/conformance/docker-compose.yml down
+
+conformance-purge: ## Stop the suite stack AND delete its volumes (clean slate)
+	docker compose -f scripts/conformance/docker-compose.yml down -v
+
+conformance-seed: ## Provision the certification tenant (org/env/user/clients) via the platform API
+	bash scripts/conformance/conformance-seed.sh
 
 heads: ## Per-repo HEADs
 	@for d in */; do \

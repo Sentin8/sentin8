@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright Logically Magic Inc. <hello@logicallymagic.com>
+# SPDX-FileCopyrightText: Copyright Hamid Jahanzad <Hamid@Jahanzad.com>
+# SPDX-FileCopyrightText: Copyright Contributors to the Sentin8
+# SPDX-License-Identifier: Apache-2.0
+
+# OIDF conformance suite - local rig compose (DESIGN.md §9a.2).
+#
+# This file mirrors the OIDF-published docker-compose-prebuilt.yml with
+# only the BASE_URL default kept. The suite is the free, open-source OIDF
+# tool (gitlab.com/openid/conformance-suite); certification fees apply
+# only at submission (waived for open-source projects per the OIDF
+# open-source project certification policy).
+#
+# Usage (make conformance-up / make conformance-down):
+#   docker compose -f scripts/conformance/docker-compose.yml up -d
+#
+# The server image is DERIVED (server.Dockerfile): the suite's Java
+# client must trust the platform's Acme root CA when it calls the OP -
+# mounting a .crt alone does not update the JVM truststore, so the
+# Dockerfile imports it with keytool at build time. The cert is copied
+# into this directory by `make conformance-up` (root-ca.crt).
+#
+# Suite UI:   https://localhost.emobix.co.uk:8443/
+#   (localhost.emobix.co.uk publicly resolves to 127.0.0.1 - no
+#   /etc/hosts entry needed)
+# Pin IMAGE_TAG for reproducible runs (e.g. IMAGE_TAG=v5.3.32).
+
+services:
+  mongodb:
+    image: mongo:6.0.13
+    volumes:
+      - conformance-mongo:/data/db
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: server.Dockerfile
+      args:
+        IMAGE_TAG: ${IMAGE_TAG:-latest}
+    depends_on:
+      - mongodb
+    # The suite (and its browser callbacks) must reach the platform OP.
+    # Inside a container, the *.local.sentin8.dev wildcard zone resolves
+    # to 127.0.0.1 (the public dev zone) - which is the CONTAINER itself.
+    # Map the platform hostnames to the docker host gateway (the proxy
+    # listens on the host's :443). `host-gateway` is the built-in that
+    # resolves to the host IP on every docker setup.
+    extra_hosts:
+      # All platform hostnames the suite must reach resolve inside the
+      # container to its own 127.0.0.1 (the public wildcard dev zone) -
+      # map them to the docker host gateway where the proxy listens on
+      # :443. Pinned to the host-gateway IP: the `host-gateway` alias
+      # yields an IPv6 form first on some setups and the JVM prefers
+      # it, dying with "Network is unreachable" while curl works.
+      - "auth.cert.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.ops.sys.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+    environment:
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/conformance
+      # The base URL the suite advertises to the OP under test (redirect
+      # URIs + the front-channel test pages). The image entrypoint maps
+      # ${BASE_URL} into the java -Dfintechlabs.base_url flag -
+      # FINTECHLABS_BASE_URL as a bare env var is NOT read.
+      BASE_URL: ${BASE_URL:-https://localhost.emobix.co.uk:8443}
+      # Login beans: this suite build ALWAYS instantiates the GitLab OIDC
+      # client registration (WebSecurityConfig's static-resource chain
+      # pulls it via HttpSecurity in every profile - dev mode injects a
+      # dummy USER, not a dummy REGISTRATION). The image entrypoint
+      # forwards OIDC_GITLAB_CLIENTID/SECRET as -D system properties; when
+      # they are empty the app dies at startup: "Client id of registration
+      # 'gitlab' must not be empty". Dev mode never performs a real
+      # GitLab login, so non-empty placeholder values satisfy the bean
+      # without enabling anything. Same for the Google pair.
+      OIDC_GITLAB_CLIENTID: ${OIDC_GITLAB_CLIENTID:-local-dev-placeholder}
+      OIDC_GITLAB_SECRET: ${OIDC_GITLAB_SECRET:-local-dev-placeholder}
+      OIDC_GOOGLE_CLIENTID: ${OIDC_GOOGLE_CLIENTID:-local-dev-placeholder}
+      OIDC_GOOGLE_SECRET: ${OIDC_GOOGLE_SECRET:-local-dev-placeholder}
+      # Dev mode (dummy user injected, no real login flow) - property +
+      # profile, both set (the property is the gate the code reads via
+      # @Value("${fintechlabs.devmode:false}")).
+      JAVA_EXTRA_ARGS: ${JAVA_EXTRA_ARGS:--Dspring.profiles.active=dev -Dfintechlabs.devmode=true -Djava.net.preferIPv4Stack=true}
+    restart: unless-stopped
+
+  nginx:
+    image: registry.gitlab.com/openid/conformance-suite/nginx:${IMAGE_TAG:-latest}
+    depends_on:
+      - server
+    ports:
+      - "8443:8443"
+    restart: unless-stopped
+
+volumes:
+  conformance-mongo:

@@ -5,7 +5,7 @@
 
 # Sentin8 local development environment - Docker Compose.
 # Stories 0.1.2: Docker Compose for local dev (PostgreSQL, Valkey).
-# Story 0.1.3: Sentin8:Sentin8:TLS is the reverse proxy with wildcard *.sentin8.local Sentin8:TLS.
+# Story 0.1.3: Sentin8:Sentin8:TLS is the reverse proxy with wildcard *.local.sentin8.dev Sentin8:TLS.
 #
 # Only infrastructure containers are defined here (PostgreSQL, Valkey). Sentin8
 # Rust services run directly on the host via `make run-<service>` during
