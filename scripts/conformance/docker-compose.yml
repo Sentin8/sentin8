@@ -87,6 +87,16 @@ services:
       - server
     ports:
       - "8443:8443"
+    # OIDF-CERT-1 / auth DESIGN §9a.2 step 1b: the suite image hardcodes a
+    # self-signed CN=localhost cert no browser trusts (front-channel
+    # browser tests + the operator's plan tab died on ERR_CERT_AUTHORITY_INVALID).
+    # Bind-mount the platform-CA leaf (CN conformance-suite, SAN
+    # localhost.emobix.co.uk - minted by `make infra-tls` and copied into
+    # this directory by `make conformance-up`) over the image's cert paths;
+    # the image's own nginx.conf keeps working unchanged.
+    volumes:
+      - ./suite-localhost-emobix.crt:/etc/ssl/certs/nginx-selfsigned.crt:ro
+      - ./suite-localhost-emobix.key:/etc/ssl/private/nginx-selfsigned.key:ro
     restart: unless-stopped
 
 volumes:

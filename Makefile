@@ -244,6 +244,16 @@ conformance-up: ## Start the OIDF conformance suite stack (mongo + server + ngin
 	# (copied into the build context by this target; the derived image
 	# imports it with keytool - a bind mount alone does not reach the JVM).
 	cp -f ../.run/secrets/acme-ca/root-ca.crt scripts/conformance/root-ca.crt
+	# OIDF-CERT-1 (auth DESIGN §9a.2 step 1b): the suite's nginx serves a
+	# platform-CA leaf (CN conformance-suite, SAN localhost.emobix.co.uk)
+	# instead of the image's self-signed cert - minted by `make infra-tls`,
+	# mounted read-only by the compose nginx service over the image paths.
+	# A missing pair means `make infra-tls` has not run - fail with the hint
+	# rather than starting an untrusted ingress.
+	test -f ../.run/secrets/infra-tls/conformance-suite-server.crt || { \
+		echo 'conformance suite leaf missing - run: make infra-tls'; exit 1; }
+	cp -f ../.run/secrets/infra-tls/conformance-suite-server.crt scripts/conformance/suite-localhost-emobix.crt
+	cp -f ../.run/secrets/infra-tls/conformance-suite-server.key scripts/conformance/suite-localhost-emobix.key
 	docker compose -f scripts/conformance/docker-compose.yml up -d --build
 	@echo "suite UI: https://localhost.emobix.co.uk:8443/ (alias sentin8-local)"
 

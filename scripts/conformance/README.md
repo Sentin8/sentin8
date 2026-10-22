@@ -19,6 +19,13 @@
   `.run/secrets/acme-ca/root-ca.crt` into the server container
   truststore, or run `make conformance-ca` to bake it into a derived
   image (recommended).
+- The **suite ingress leaf** (no self-signed warnings): `make infra-tls`
+  mints `.run/secrets/infra-tls/conformance-suite-server.crt/.key`
+  (CN `conformance-suite`, SAN `localhost.emobix.co.uk`, signed by the
+  platform CA the OS already trusts); `make conformance-up` mounts the
+  pair into the suite's nginx (auth DESIGN §9a.2 step 1b). Run
+  `make infra-tls` once before the first `conformance-up` if the
+  material is missing.
 
 ## 2. Start the suite
 
@@ -41,7 +48,12 @@ make conformance-seed
 The seed script (via `sentin8-cli call` + sign-up):
 1. Signs up / signs in the certification user (`cert@…`).
 2. Creates org `conformance-local` + env `cert`.
-3. Sets the env's security profile to the target per run:
+3. Sets the env's security profile to the target per run (the env row
+   otherwise INHERITS the platform's `fapi_2` posture - PAR+JARM+DPoP -
+   which plain OIDC Core tests cannot pass; `standard` = plain code
+   flow + RS256, all FAPI flags off; override with `CONFORMANCE_PROFILE`
+   for FAPI runs, but the FAPI profiles ALSO need their flags re-enabled
+   on the row - the seed sets the `standard` flag shape only):
    - `standard` for OIDC Core/Config/Dynamic + Logout profiles,
    - `fapi_2` for FAPI 2 Security Profile / Message Signing,
    - `fapi_1_advanced` for FAPI 1 Advanced,
@@ -78,8 +90,11 @@ configuration (discovery URL, client credentials, test user) → ALIAS
 | FAPI-CIBA: Ping | `fapi_ciba` | the suite's ping callback must be reachable from auth |
 
 Result rule: every test must end PASSED / WARNING / REVIEW (no FAILED,
-no INTERRUPTED) before the profile counts as locally green. Export each
-run's logs (JSON + log-detail.html) into `.tmp/conformance/results/`.
+no INTERRUPTED) **and none may be SKIPPED** before the profile counts as
+locally green - a suite skip means discovery advertised the capability
+away, which is a coverage hole with the same priority as a failure (auth
+DESIGN §9a.10). Export each run's logs (JSON + log-detail.html) into
+`.tmp/conformance/results/`.
 
 ## 5. CIBA ping connectivity (local)
 

@@ -16,3 +16,9 @@
 *.swp
 .idea/
 .vscode/
+
+# OIDF rig TLS material copied from the secrets tree by `make conformance-up`
+# (root CA for the server image build, the nginx leaf for the ingress mount)
+/scripts/conformance/root-ca.crt
+/scripts/conformance/suite-localhost-emobix.crt
+/scripts/conformance/suite-localhost-emobix.key
