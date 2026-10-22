@@ -276,8 +276,8 @@ for c in items:
 " | while read -r cid; do
   [ -n "$cid" ] && ccall auth DELETE "/v1/admin/oauth-clients/$cid" --env "$ENV_ID" >/dev/null
 done
-BASIC_JSON="$(dcr "cert-basic-basic" '"token_endpoint_auth_method":"client_secret_basic"')"
-POSTC_JSON="$(dcr "cert-basic-post" '"token_endpoint_auth_method":"client_secret_post"')"
+BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
 PKCE_JSON="$(dcr "cert-public-pkce" '"token_endpoint_auth_method":"none"')"
 
 # CIBA client: ping delivery points at the suite callback (poll + ping).
