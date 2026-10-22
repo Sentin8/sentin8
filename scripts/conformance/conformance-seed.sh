@@ -358,8 +358,11 @@ fi
 # The mtls cell's client authentication is the CERTIFICATE
 # (self_signed_tls_client_auth, RFC 8705 §2.4): the seed mints a
 # SELF-SIGNED EC P-256 client cert, registers the sha-256 thumbprint via
-# DCR, and publishes the cert+key PEMs to seed-out (the suite presents
-# the SAME cert on its token + resource calls; auth binds `cnf.x5t#S256`).
+# DCR (WITH the client's signing jwks - the client still signs its
+# request objects with the private_key_jwt-family key), and publishes to
+# seed-out: the cert+key PEMs, the base64(DER) forms (the suite's
+# PEMFormatter decodes config.mtls.* AS base64), and the client's
+# private jwks (the suite signs request objects from config.client.jwks).
 if [[ "$PROFILE" == fapi_* ]]; then
   log "registering FAPI2 mTLS cell clients (self_signed_tls_client_auth)"
   for cl in main second; do
@@ -371,12 +374,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
 import datetime
 
-key = ec.generate_private_key(ec.SECP256R1())
+cert_key = ec.generate_private_key(ec.SECP256R1())
 name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "cert-fapi2-mtls")])
 now = datetime.datetime.now(datetime.timezone.utc)
 cert = (x509.CertificateBuilder()
         .subject_name(name).issuer_name(name)
-        .public_key(key.public_key())
+        .public_key(cert_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=365))
@@ -386,18 +389,30 @@ cert = (x509.CertificateBuilder()
                                      key_agreement=False, key_cert_sign=False,
                                      crl_sign=False, encipher_only=False,
                                      decipher_only=False), critical=True)
-        .sign(key, hashes.SHA256()))
+        .sign(cert_key, hashes.SHA256()))
 der = cert.public_bytes(serialization.Encoding.DER)
-key_der = key.private_bytes(serialization.Encoding.DER,
-                            serialization.PrivateFormat.PKCS8,
-                            serialization.NoEncryption())
+key_der = cert_key.private_bytes(serialization.Encoding.DER,
+                                 serialization.PrivateFormat.PKCS8,
+                                 serialization.NoEncryption())
 thumb = base64.urlsafe_b64encode(hashlib.sha256(der).digest()).rstrip(b'=').decode()
+# The client's REQUEST-OBJECT signing key (separate from the TLS cert).
+sig_key = ec.generate_private_key(ec.SECP256R1())
+pub = sig_key.public_key().public_bytes(serialization.Encoding.X962,
+                                        serialization.PublicFormat.UncompressedPoint)
+x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
+y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
+d = sig_key.private_numbers().private_value.to_bytes(32, 'big')
+d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+private_jwks = {"kty": "EC", "kid": "fapi2-mtls-key", "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
+public_jwks = {"keys": [{"kty": "EC", "kid": "fapi2-mtls-key", "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
 print(json.dumps({"cert_pem": cert.public_bytes(serialization.Encoding.PEM).decode(),
-                  "key_pem": key.private_bytes(serialization.Encoding.PEM,
-                                               serialization.PrivateFormat.PKCS8,
-                                               serialization.NoEncryption()).decode(),
+                  "key_pem": cert_key.private_bytes(serialization.Encoding.PEM,
+                                                    serialization.PrivateFormat.PKCS8,
+                                                    serialization.NoEncryption()).decode(),
                   "der_b64": base64.b64encode(der).decode(),
-                  "thumbprint": thumb}))
+                  "thumbprint": thumb,
+                  "private_jwks": private_jwks,
+                  "public_jwks": public_jwks}))
 PYMTLS
 )"
     if [ -z "$CERTJSON" ]; then
@@ -408,17 +423,20 @@ PYMTLS
     KEY_PEM="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['key_pem'])")"
     THUMB="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['thumbprint'])")"
     DER64="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['der_b64'])")"
+    PRIVJWKS="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private_jwks']))")"
+    PUBJWKS="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public_jwks']))")"
     if [ "$cl" = main ]; then
-      MJSON="$(dcr "cert-fapi2-mtls" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\"")"
+      MJSON="$(dcr "cert-fapi2-mtls" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS")"
       emit_client "fapi2-mtls" "$MJSON"
     else
-      MJSON2="$(dcr "cert-fapi2-mtls-2" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\"]")"
+      MJSON2="$(dcr "cert-fapi2-mtls-2" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\"]")"
       emit_client "fapi2-second-mtls" "$MJSON2"
     fi
     echo "mtls_cert_pem($cl)=$CERT_PEM" >> "$SEED_OUT"
     echo "mtls_key_pem($cl)=$KEY_PEM" >> "$SEED_OUT"
     echo "mtls_cert_der_b64($cl)=$DER64" >> "$SEED_OUT"
     echo "mtls_thumbprint($cl)=$THUMB" >> "$SEED_OUT"
+    echo "private_jwks(fapi2-mtls-$cl)=$PRIVJWKS" >> "$SEED_OUT"
   done
 fi
 
