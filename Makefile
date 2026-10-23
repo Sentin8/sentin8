@@ -234,16 +234,42 @@ test-openapi: ## Run every platform drift-guard test (OAPEC §4.8 — the nightl
 		(cd $$d && $(call stamp_env,$$d) $(CARGO) test --test openapi_drift) || exit 1; \
 	done
 
-# ── OIDF conformance rig (sentin8-auth DESIGN §9a) ───────────────────
+# ── OIDF conformance rig (sentin8-auth DESIGN §9a; owned by sentin8-auth-oidf) ──
 # The free, local OIDF suite run: cert tenant seeding + all profile
 # plans except the two design exclusions (Front-Channel Logout,
-# Implicit/Hybrid OP). Runbook: scripts/conformance/README.md.
+# Implicit/Hybrid OP). Runbook: sentin8-auth-oidf/conformance/README.md.
 
-conformance-up: ## Start the OIDF conformance suite stack (mongo + server + nginx at :8443)
+# Conformance rig fleet posture (auth DESIGN §9a.2 step 3): the suite
+# Java client cannot speak the post-quantum TLS transport or verify
+# ML-DSA-65 JOSE, so a rig run starts the platform in CLASSICAL mode
+# (TLS 1.2/1.3 + RSA/ECDSA certs, RS256 JWTs) with the FAPI cipher
+# profile and the RFC 8705 self-signed client-cert surface. `make start`
+# below keeps whatever ../.env declares (production posture).
+start-conformance: ## Start the platform fleet in the rig posture (classical TLS + FAPI ciphers + self-signed client certs)
+	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
+	@export SENTIN8_CAPTAIN_BINARY_PREFIX="$(BINARY_PREFIX)"; \
+	export SENTIN8_TLS_PQ_MODE=classical; \
+	export SENTIN8_TLS_CIPHER_PROFILE=fapi; \
+	export SENTIN8_MTLS_CLIENT_AUTH=self_signed; \
+	export SENTIN8_TLS_CLIENT_AUTH=self_signed; \
+	export SENTIN8_PG_POOL_MAX=$${SENTIN8_PG_POOL_MAX:-8}; \
+	set -a; . ../.env; set +a; \
+	eval "export $(RUNDIR_ENV)"; \
+	cd sentin8-cli; \
+	if $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain services --no-infra >/dev/null 2>&1; then \
+		echo "→ captain up (rig posture) — starting the platform core via API (idempotent)"; \
+		$(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start $(PLATFORM_SERVICES); \
+	else \
+		echo "→ captain down (rig posture) — booting the platform core"; \
+		export SENTIN8_SERVICES="$(PLATFORM_SERVICES)"; \
+		$(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start; \
+	fi
+
+conformance-up: start-conformance ## Start the OIDF conformance suite stack (mongo + server + nginx at :8443)
 	# Bake the platform root CA into the suite server image's JVM truststore
 	# (copied into the build context by this target; the derived image
 	# imports it with keytool - a bind mount alone does not reach the JVM).
-	cp -f ../.run/secrets/acme-ca/root-ca.crt scripts/conformance/root-ca.crt
+	cp -f ../.run/secrets/acme-ca/root-ca.crt sentin8-auth-oidf/conformance/root-ca.crt
 	# OIDF-CERT-1 (auth DESIGN §9a.2 step 1b): the suite's nginx serves a
 	# platform-CA leaf (CN conformance-suite, SAN localhost.emobix.co.uk)
 	# instead of the image's self-signed cert - minted by `make infra-tls`,
@@ -252,19 +278,19 @@ conformance-up: ## Start the OIDF conformance suite stack (mongo + server + ngin
 	# rather than starting an untrusted ingress.
 	test -f ../.run/secrets/infra-tls/conformance-suite-server.crt || { \
 		echo 'conformance suite leaf missing - run: make infra-tls'; exit 1; }
-	cp -f ../.run/secrets/infra-tls/conformance-suite-server.crt scripts/conformance/suite-localhost-emobix.crt
-	cp -f ../.run/secrets/infra-tls/conformance-suite-server.key scripts/conformance/suite-localhost-emobix.key
-	docker compose -f scripts/conformance/docker-compose.yml up -d --build
+	cp -f ../.run/secrets/infra-tls/conformance-suite-server.crt sentin8-auth-oidf/conformance/suite-localhost-emobix.crt
+	cp -f ../.run/secrets/infra-tls/conformance-suite-server.key sentin8-auth-oidf/conformance/suite-localhost-emobix.key
+	docker compose -f sentin8-auth-oidf/conformance/docker-compose.yml up -d --build
 	@echo "suite UI: https://localhost.emobix.co.uk:8443/ (alias sentin8-local)"
 
 conformance-down: ## Stop the suite stack (keeps the mongo volume)
-	docker compose -f scripts/conformance/docker-compose.yml down
+	docker compose -f sentin8-auth-oidf/conformance/docker-compose.yml down
 
 conformance-purge: ## Stop the suite stack AND delete its volumes (clean slate)
-	docker compose -f scripts/conformance/docker-compose.yml down -v
+	docker compose -f sentin8-auth-oidf/conformance/docker-compose.yml down -v
 
 conformance-seed: ## Provision the certification tenant (org/env/user/clients) via the platform API
-	bash scripts/conformance/conformance-seed.sh
+	bash sentin8-auth-oidf/conformance/conformance-seed.sh
 
 heads: ## Per-repo HEADs
 	@for d in */; do \
