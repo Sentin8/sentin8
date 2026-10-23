@@ -283,7 +283,31 @@ PKCE_JSON="$(dcr "cert-public-pkce" '"token_endpoint_auth_method":"none"')"
 # CIBA client: ping delivery points at the suite callback (poll + ping).
 # Single-line JSON (curl -d with embedded newlines inside quoted values
 # broke the body in the shell heredoc shape).
-CIBA_JSON="$(dcr "cert-ciba" "\"grant_types\":[\"urn:openid:params:grant-type:ciba\",\"refresh_token\"],\"token_endpoint_auth_method\":\"client_secret_post\",\"backchannel_client_notification_endpoint\":\"$CALLBACK\"")"
+# The fapi_ciba posture REQUIRES private_key_jwt client auth (the
+# bc-authorize gate rejects the secret methods) - the client carries its
+# OWN EC P-256 key (the suite signs client assertions with the private
+# jwks; the assertion audience = the backchannel endpoint).
+CIBA_KEYS="$(python3 - <<'PYGEN'
+import base64, json
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+key = ec.generate_private_key(ec.SECP256R1())
+pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
+y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
+d = key.private_numbers().private_value.to_bytes(32, 'big')
+d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+kid = 'ciba-key'
+private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
+public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+print(json.dumps({"private": private, "public": public}))
+PYGEN
+)"
+CIBA_PUB=$(echo "$CIBA_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")
+CIBA_PRIV=$(echo "$CIBA_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")
+CIBA_PING_URL="${CALLBACK%/callback}/ciba-notification-endpoint"
+CIBA_JSON="$(dcr "cert-ciba" "\"grant_types\":[\"urn:openid:params:grant-type:ciba\",\"refresh_token\"],\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$CIBA_PUB,\"backchannel_client_notification_endpoint\":\"$CIBA_PING_URL\"")"
 
 # Client ids/secrets print AND persist (.tmp/conformance/seed-out.txt -
 # the OIDF automation harness reads it for the suite plan configs).
@@ -293,10 +317,39 @@ emit_client() { # emit_client <name> <json>
   echo "client_id($1)=$(jget "$2" client_id)" | tee -a "$SEED_OUT"
   echo "client_secret($1)=$(jget "$2" client_secret)" | tee -a "$SEED_OUT"
 }
+echo "private_jwks(ciba)=$CIBA_PRIV" >> /dev/null 2>&1 || true
+# CIBA second client - the suite's AbstractFAPICIBAID1MultipleClient
+# family (signed-by-other-client / bad-iss / multiple hints) drives a
+# SECOND registered client: a distinct id + its OWN keypair (the
+# signed-by-other-client negative only fails when the two clients
+# actually differ).
+CIBA2_KEYS="$(python3 - <<'PYGEN2'
+import base64, json
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+key = ec.generate_private_key(ec.SECP256R1())
+pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
+y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
+d = key.private_numbers().private_value.to_bytes(32, 'big')
+d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+kid = 'ciba2-key'
+private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
+public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+print(json.dumps({"private": private, "public": public}))
+PYGEN2
+)"
+CIBA2_PUB="$(echo "$CIBA2_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")"
+CIBA2_PRIV="$(echo "$CIBA2_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")"
+CIBA2_JSON="$(dcr "cert-ciba-2" "\"grant_types\":[\"urn:openid:params:grant-type:ciba\",\"refresh_token\"],\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$CIBA2_PUB,\"backchannel_client_notification_endpoint\":\"$CIBA_PING_URL\"")"
 emit_client basic "$BASIC_JSON"
 emit_client post "$POSTC_JSON"
 emit_client pkce "$PKCE_JSON"
 emit_client ciba "$CIBA_JSON"
+emit_client ciba2 "$CIBA2_JSON"
+echo "private_jwks(ciba)=$CIBA_PRIV" >> "$SEED_OUT"
+echo "private_jwks(ciba2)=$CIBA2_PRIV" >> "$SEED_OUT"
 echo "org_id=$ORG_ID" >> "$SEED_OUT"
 echo "env_id=$ENV_ID" >> "$SEED_OUT"
 chmod 600 "$SEED_OUT"
