@@ -183,7 +183,10 @@ case "$PROFILE" in
   fapi_2)
     FLAGS='"require_par":true,"require_jarm":true,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_2_message_signing)
-    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":true,"require_jwt_introspection":true';;
+    # The FINAL msg-signing plan's "request signing" = SIGNED REQUEST OBJECTS
+    # (JAR signed_non_repudiation) - the happy flow's token POST is PLAIN;
+    # no RFC 9421 HTTP-message-signature or introspection posture.
+    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_1_advanced)
     FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_iss":true,"require_mtls":true,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_ciba)
