@@ -1,5 +1,13 @@
 # sentin8/ - Platform Group
 
+> The Sentin8 platform: identity (Auth/Prox), bus, storage, cron, flow,
+> func, dash, ai, CLI, captain, Flutter SDK. All repositories are
+> independent git repos; this folder is a plain group directory (RS §4.4).
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
+[![Docs](https://img.shields.io/badge/docs-read-3aa757.svg)](BUSINESS.md)
+
 The Sentin8 platform: the shared library workspace (`sentin8-sdk`), the two
 starters (`sentin8-cli`, `sentin8-captain`), the 17 platform services, the
 Flutter package and platform apps, e2e, and packaging. Every repository in
