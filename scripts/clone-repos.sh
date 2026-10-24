@@ -30,7 +30,7 @@ if [[ $# -eq 0 ]]; then
             sentin8-bff   sentin8-bus  sentin8-captain sentin8-ci sentin8-cli
             sentin8-cron  sentin8-dash sentin8-db      sentin8-e2e sentin8-flow
             sentin8-flutter sentin8-func sentin8-packaging sentin8-post sentin8-proxy
-            sentin8-sdk sentin8-secrets sentin8-site sentin8-site-engine
+            sentin8-sdk sentin8-secrets sentin8-sign sentin8-site sentin8-site-engine
             sentin8-stat  sentin8-storage sentin8-sys sentin8-web
         )
     fi

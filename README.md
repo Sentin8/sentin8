@@ -29,7 +29,7 @@ directory (RS §4.4).
 | `sentin8-sdk` | THE shared workspace: all platform crates + service SDK crates + facade crate `sentin8` (tag `sdk-v0.1.0`) |
 | `sentin8-cli` | Starter: platform bootstrap (`db bootstrap` → platform.sql), composable enrollment, captain control |
 | `sentin8-captain` | Starter: process supervisor, health-gated tier spawning (D6) |
-| `sentin8-{svc}` × 17 | Platform services: auth, acme, proxy, bus, db, storage, post, stat, secrets, func, cron, flow, ai, sys, app, bff, web |
+| `sentin8-{svc}` × 18 | Platform services: auth, acme, proxy, bus, db, storage, post, stat, secrets, sign, func, cron, flow, ai, sys, app, bff, web |
 | `sentin8-flutter` | Shared Flutter package (native + web infra) |
 | `sentin8-site-engine` | `@sentin8/site-engine` - the shared Docusaurus engine (theme, components, harvester, site scaffolder) behind sentin8.dev + every `{vertical}.dev` site (WEB) |
 | `sentin8-site` | The public platform website at sentin8.dev (Docusaurus on the site engine; harvests the unit repos' docs trios) |

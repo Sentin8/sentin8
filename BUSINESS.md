@@ -27,6 +27,7 @@
 | Notifications | `sentin8-post` | Email/SMS/push delivery for all services |
 | Analytics/telemetry | `sentin8-stat` | Product and ops metrics |
 | Secrets | `sentin8-secrets` | Credential storage by reference |
+| E-signature | `sentin8-sign` | Signature ceremonies (AdES/QES) for every product |
 | Scheduling, workflows, functions | `sentin8-cron`, `sentin8-flow`, `sentin8-func` | Automation without bespoke infra |
 | Orchestration | `sentin8-sys`, `sentin8-app` | Orgs, environments, app store |
 | Client access | `sentin8-bff`, `sentin8-web` | Tokens never reach browsers; app hosting |

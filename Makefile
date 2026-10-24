@@ -17,7 +17,7 @@
 SHELL := /bin/bash
 CARGO ?= cargo
 
-SERVICES := auth acme proxy bus db storage post stat secrets func cron flow ai sys app bff web
+SERVICES := auth acme proxy bus db storage post stat secrets sign func cron flow ai sys app bff web
 
 # Cargo profile flag: empty = dev/debug (default), --release = release.
 # Set it on the command line (RELEASE=--release make start) or use the
@@ -138,7 +138,7 @@ build-one:
 # `make start`). The catalog stays the FULL union (the scope pin filters
 # only the boot spawn), so a vertical joins the running fleet any time
 # via its group Makefile or `captain start <vertical type>`.
-PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:stat,sentin8:secrets,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
+PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:stat,sentin8:secrets,sentin8:sign,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
 
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
