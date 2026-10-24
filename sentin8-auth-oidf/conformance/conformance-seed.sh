@@ -22,6 +22,9 @@
 
 set -euo pipefail
 
+# The script lives in sentin8-auth-oidf/conformance/ (moved from
+# scripts/conformance - OC-13): the SAME directory depth as before, so the
+# group root (sentin8/) is still two levels up.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # repo group root (sentin8/)
 TMP="$ROOT/../.tmp/conformance"
 mkdir -p "$TMP"
@@ -170,7 +173,7 @@ case "$PROFILE" in
   fapi_*) CONSENT_REQUIRED="true";;
 esac
 case "$PROFILE" in
-  fapi_2|fapi_2_message_signing|fapi_ciba) ALG="ES256";;
+  fapi_2|fapi_2_message_signing|fapi_ciba|vci) ALG="ES256";;
 esac
 log "setting env security profile to $PROFILE"
 # Per-profile flag posture (auth DESIGN §9a.5/§9a.3; OC-13): the flags
@@ -191,6 +194,13 @@ case "$PROFILE" in
     FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_iss":true,"require_mtls":true,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_ciba)
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+  vci)
+    # OID4VCI issuer cells: the suite's vci profile drives PAR-pushed
+    # authorization (the credential offer's pre-authorized codes ride the
+    # pushed flow); no JARM (the code response stays plain - the suite
+    # parses a standard code redirect), no mTLS (private_key_jwt +
+    # dpop-only sender constraint).
+    FLAGS='"require_par":true,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   *)
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
 esac
@@ -248,12 +258,16 @@ dcr() { # dcr <name> <json-extra>
   # (e.g. the happy-flow client2's query-parameter variant).
   local uris="\"redirect_uris\":[\"$CALLBACK\"],"
   if [[ "$extra" == *'"redirect_uris"'* ]]; then uris=""; fi
+  # Same duplicate-field rule for scope (serde rejects duplicates - the
+  # VCI clients carry their own credential scopes).
+  local scope="\"scope\":\"openid profile email phone address offline_access\","
+  if [[ "$extra" == *'"scope"'* ]]; then scope=""; fi
   local body="{
     \"client_name\":\"$name\",
     $uris
     $grants
     \"response_types\":[\"code\"],
-    \"scope\":\"openid profile email phone address offline_access\",
+    $scope
     \"code_challenge_method\":\"S256\",
     \"consent_required\":$CONSENT_REQUIRED${extra:+,$extra}
   }"
@@ -351,6 +365,87 @@ emit_client post "$POSTC_JSON"
 emit_client pkce "$PKCE_JSON"
 emit_client ciba "$CIBA_JSON"
 emit_client ciba2 "$CIBA2_JSON"
+
+# OID4VCI issuer static client (the plan's happy-flow family runs
+# client_registration=static_client): private_key_jwt + its own EC jwks
+# (the same private-to-suite pattern as the CIBA clients - the suite
+# signs the DPoP-less credential proofs + client assertions with the
+# handed keys). The scope carries BOTH credential types (the suite
+# requests one configuration id per flow; the scope is the consent).
+VCI_KEYS="$(python3 - <<'PYGENVCI'
+import base64, json
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+def mk(kid):
+    key = ec.generate_private_key(ec.SECP256R1())
+    pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
+    y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
+    d = key.private_numbers().private_value.to_bytes(32, 'big')
+    d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+    private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
+    public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+    return private, public
+
+p1, pub1 = mk('vci-key')
+p2, pub2 = mk('vci-key2')
+print(json.dumps({"p1": p1, "pub1": pub1, "p2": p2, "pub2": pub2}))
+PYGENVCI
+)"
+VCI_PUB1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['pub1']))")
+VCI_PUB2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['pub2']))")
+VCI_PRIV1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p1']))")
+VCI_PRIV2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p2']))")
+VCI_SCOPE='openid profile email offline_access credential:VerifiedPersonCredential credential:VerifiedEmployeeCredential'
+VCI_JSON="$(dcr "cert-vci" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB1,\"scope\":\"$VCI_SCOPE\"")"
+VCI2_JSON="$(dcr "cert-vci-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB2,\"scope\":\"$VCI_SCOPE\"")"
+emit_client vci "$VCI_JSON"
+emit_client vci2 "$VCI2_JSON"
+echo "private_jwks(vci)=$VCI_PRIV1" >> "$SEED_OUT"
+echo "private_jwks(vci2)=$VCI_PRIV2" >> "$SEED_OUT"
+
+# OID4VCI key-ATTESTATION issuer key (the rig plays the attester): the
+# suite signs key-attestation+jwt with this key and the plan config
+# publishes its PUBLIC JWKS as vci_key_attestation_jwks (the trusted
+# attester set). The private form goes to seed-out for the harness.
+VCIATT_KEYS="$(python3 - <<'PYGENVCIATT'
+import base64, datetime, json
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+key = ec.generate_private_key(ec.SECP256R1())
+pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
+y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
+d = key.private_numbers().private_value.to_bytes(32, 'big')
+d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+kid = 'vci-attester-key'
+# The attestation signer key needs an x5c chain (VCIGenerateKeyAttestation:
+# "A x5c entry is required in the client's signing key"). Self-issue a
+# leaf certificate for the attester and embed the DER chain base64.
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'vci-attester.conformance-local.local.sentin8.dev')])
+now = datetime.datetime.now(datetime.timezone.utc)
+cert = (x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(key, hashes.SHA256()))
+x5c = [base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()]
+private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256", "x5c": x5c}
+public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y, "x5c": x5c}]}
+print(json.dumps({"private": private, "public": public}))
+PYGENVCIATT
+)"
+VCIATT_PRIV=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")
+VCIATT_PUB=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")
+echo "private_jwks(vciatt)=$VCIATT_PRIV" >> "$SEED_OUT"
+echo "public_jwks(vciatt)=$VCIATT_PUB" >> "$SEED_OUT"
 echo "private_jwks(ciba)=$CIBA_PRIV" >> "$SEED_OUT"
 echo "private_jwks(ciba2)=$CIBA2_PRIV" >> "$SEED_OUT"
 echo "org_id=$ORG_ID" >> "$SEED_OUT"

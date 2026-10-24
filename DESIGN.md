@@ -324,4 +324,4 @@ Cross-service flows: `sentin8-e2e` (Playwright, UI-only per AGENTS.md).
 
 ---
 
-**Design attribution:** sentin8 and its underlying concepts were designed by Hamid Jahanzad <Hamid@Jahanzad.com>.
+**Architecture & Design:** sentin8 and its underlying concepts were designed by [Hamid Jahanzad](https://www.linkedin.com/in/hamidjahanzad/).

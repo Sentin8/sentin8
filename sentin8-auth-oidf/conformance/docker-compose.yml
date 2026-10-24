@@ -12,7 +12,7 @@
 # open-source project certification policy).
 #
 # Usage (make conformance-up / make conformance-down):
-#   docker compose -f scripts/conformance/docker-compose.yml up -d
+#   docker compose -f sentin8-auth-oidf/conformance/docker-compose.yml up -d
 #
 # The server image is DERIVED (server.Dockerfile): the suite's Java
 # client must trust the platform's Acme root CA when it calls the OP -
