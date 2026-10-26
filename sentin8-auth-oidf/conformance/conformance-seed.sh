@@ -17,8 +17,20 @@
 # Idempotent: re-running skips what already exists.
 #
 # Outputs (for the suite configuration form):
-#   .tmp/conformance/cert-user.env   - test user credentials
+#   .tmp/conformance/seed-out/<env-slug>.txt - per-env seed facts
+#   (.tmp/conformance/seed-out.txt = the env `cert` default, kept for
+#    the single-env flows)
+#   .tmp/conformance/cert-user-<env-slug>.env - test user credentials
 #   stdout                           - org/env ids + client registrations
+#
+# Profile-per-env (DESIGN §9a.2, OC-20): each family seeds its OWN env
+# (env slug + suite alias via CONFORMANCE_ENV_SLUG / CONFORMANCE_ALIAS;
+# defaults = env `cert` + alias `sentin8-local`, the standard family).
+# The env slug must be DNS-ALPHA (lowercase [a-z0-9-]); the suite alias
+# must be URL-path-safe ([a-z0-9-]). One USER EMAIL PER ENV (derive the
+# default from the slug: cert-user@{slug}.conformance-local... - email
+# rate buckets are shared per address, so a shared email would couple
+# the envs' bot-protection state).
 
 set -euo pipefail
 
@@ -42,10 +54,34 @@ if [ -z "$CLI" ]; then
 fi
 
 ALIAS="${CONFORMANCE_ALIAS:-sentin8-local}"
-CALLBACK="https://localhost.emobix.co.uk:8443/test/a/${ALIAS}/callback"
-USER_EMAIL="${CONFORMANCE_USER_EMAIL:-cert-user@conformance-local.local.sentin8.dev}"
-USER_PASSWORD="${CONFORMANCE_USER_PASSWORD:-Certification!2026}"
+ENV_SLUG="${CONFORMANCE_ENV_SLUG:-cert}"
 ORG_SLUG="conformance-local"
+DOMAIN_SUFFIX="local.sentin8.dev"
+# The per-env tenant identity (OC-20): the auth host + the user email
+# derive from the ENV SLUG; the suite callback/alias from the ALIAS.
+ENV_SLUG_ALPHA_OK="$(printf '%s' "$ENV_SLUG" | grep -cE '^[a-z0-9][a-z0-9-]*$' || true)"
+ALIAS_URL_OK="$(printf '%s' "$ALIAS" | grep -cE '^[a-z0-9][a-z0-9-]*$' || true)"
+if [ "$ENV_SLUG_ALPHA_OK" != "1" ] || [ "$ALIAS_URL_OK" != "1" ]; then
+  echo "[conformance-seed] invalid CONFORMANCE_ENV_SLUG ('$ENV_SLUG') or CONFORMANCE_ALIAS ('$ALIAS') - both must match ^[a-z0-9][a-z0-9-]*$" >&2
+  exit 1
+fi
+CALLBACK="https://localhost.emobix.co.uk:8443/test/a/${ALIAS}/callback"
+USER_EMAIL="${CONFORMANCE_USER_EMAIL:-cert-user@${ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}}"
+USER_PASSWORD="${CONFORMANCE_USER_PASSWORD:-Certification!2026}"
+CERT_AUTH_HOST="https://auth.${ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}"
+# Per-env seed-out (OC-20): env `cert` keeps the FLAT legacy paths (the
+# single-env flows + the specs' fallback paths read them); every other
+# env writes into seed-out/<slug>.txt (+ cert-user-<slug>.env).
+if [ "$ENV_SLUG" = "cert" ]; then
+  SEED_OUT="$TMP/seed-out.txt"
+  CERT_USER_ENV="$TMP/cert-user.env"
+  mkdir -p "$TMP"
+else
+  SEED_OUT="$TMP/seed-out/${ENV_SLUG}.txt"
+  CERT_USER_ENV="$TMP/cert-user-${ENV_SLUG}.env"
+  mkdir -p "$TMP/seed-out"
+fi
+: > "$SEED_OUT"
 
 log() { printf '[conformance-seed] %s\n' "$*"; }
 
@@ -140,19 +176,19 @@ else
 fi
 
 # GET /v1/e?org_id=... returns a top-level array of envs.
-ENV_ID="$(by_slug "$(ccall sys GET "/v1/e?org_id=$ORG_ID")" cert id)"
+ENV_ID="$(by_slug "$(ccall sys GET "/v1/e?org_id=$ORG_ID")" "$ENV_SLUG" id)"
 
 if [ -z "$ENV_ID" ]; then
-  log "creating env 'cert' in $ORG_SLUG"
+  log "creating env '$ENV_SLUG' in $ORG_SLUG"
   ENV_JSON="$(ccall sys POST /v1/e \
-    --body "{\"org_id\":\"$ORG_ID\",\"slug\":\"cert\",\"display_name\":\"Certification\"}")"
+    --body "{\"org_id\":\"$ORG_ID\",\"slug\":\"$ENV_SLUG\",\"display_name\":\"Certification - $ENV_SLUG\"}")"
   ENV_ID="$(jget "$ENV_JSON" id)"
   if [ -z "$ENV_ID" ]; then
-    ENV_ID="$(by_slug "$(ccall sys GET "/v1/e?org_id=$ORG_ID")" cert id)"
+    ENV_ID="$(by_slug "$(ccall sys GET "/v1/e?org_id=$ORG_ID")" "$ENV_SLUG" id)"
   fi
   [ -n "$ENV_ID" ] || { log "FAILED: env create returned no id"; exit 1; }
 else
-  log "env 'cert' exists ($ENV_ID)"
+  log "env '$ENV_SLUG' exists ($ENV_ID)"
 fi
 
 log "org=$ORG_ID env=$ENV_ID"
@@ -173,7 +209,7 @@ case "$PROFILE" in
   fapi_*) CONSENT_REQUIRED="true";;
 esac
 case "$PROFILE" in
-  fapi_2|fapi_2_message_signing|fapi_ciba|vci) ALG="ES256";;
+  fapi_2|fapi_2_message_signing|fapi_ciba|vci|vci_haip) ALG="ES256";;
 esac
 log "setting env security profile to $PROFILE"
 # Per-profile flag posture (auth DESIGN §9a.5/§9a.3; OC-13): the flags
@@ -201,6 +237,16 @@ case "$PROFILE" in
     # parses a standard code redirect), no mTLS (private_key_jwt +
     # dpop-only sender constraint).
     FLAGS='"require_par":true,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+  vci_haip)
+    # OID4VCI HAIP cells: the vci posture PLUS attestation-based client
+    # authentication (draft-ietf-oauth-attestation-based-client-auth;
+    # auth DESIGN §9a.19). Sender constraint = DPoP (the plan's whole
+    # fapi2 family runs sender_constrain=dpop - the require-dpop gate
+    # enforces it server-side, auth DESIGN §9a.22). The allow flag + the
+    # trust anchor (the attester's self-signed leaf PEM) + the expected
+    # attestation iss ride the profile row - discovery then advertises
+    # attest_jwt_client_auth and the attestation alg lists.
+    FLAGS='"require_par":true,"require_jarm":false,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   *)
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
 esac
@@ -212,6 +258,155 @@ case "$PROFILE" in
   fapi_2|fapi_2_message_signing) ROTATION="false";;
   *) ROTATION="true";;
 esac
+# OID4VCI key-ATTESTATION issuer key (the rig plays the attester): the
+# suite signs key-attestation+jwt with this key and the plan config
+# publishes its PUBLIC JWKS as vci_key_attestation_jwks (the trusted
+# attester set). The private form goes to seed-out for the harness.
+VCIATT_KEYS="$(VCIATT_CN="vci-attester${ENV_SLUG:+-$ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}" python3 - <<'PYGENVCIATT'
+import base64, datetime, json, os
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.x509.oid import NameOID
+
+key = ec.generate_private_key(ec.SECP256R1())
+pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
+y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
+d = key.private_numbers().private_value.to_bytes(32, 'big')
+d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+kid = 'vci-attester-key'
+# The attestation signer key needs an x5c chain (VCIGenerateKeyAttestation:
+# "A x5c entry is required in the client's signing key"). Self-issue a
+# leaf certificate for the attester and embed the DER chain base64.
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, os.environ['VCIATT_CN'])])
+now = datetime.datetime.now(datetime.timezone.utc)
+cert = (x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(key, hashes.SHA256()))
+x5c = [base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()]
+leaf_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256", "x5c": x5c}
+public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y, "x5c": x5c}]}
+print(json.dumps({"private": private, "public": public, "leaf_pem": leaf_pem}))
+PYGENVCIATT
+)"
+VCIATT_PRIV=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")
+VCIATT_PUB=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")
+VCIATT_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('leaf_pem','').rstrip())")
+
+# Attestation profile fields (vci_haip only): the trust anchor PEM
+# (attester self-signed leaf) + the expected attestation iss ride the
+# security profile row (auth DESIGN 9a.19); empty otherwise.
+ATTESTATION_FIELDS=""
+ATTESTATION_FIELDS_BASE=""
+ATTESTATION_JSON_ANCHOR=""
+if [ "$PROFILE" == "vci_haip" ]; then
+  ATTESTATION_ANCHOR="$VCIATT_PEM"
+  # The attester identity rides the ENV (OC-20): env `cert` keeps the
+  # legacy form (the specs' hardcoded constant); other envs suffix the
+  # slug. The specs read `attestation_issuer(vciatt)` from seed-out -
+  # matching rows override the constant.
+  if [ "$ENV_SLUG" = "cert" ]; then
+    ATTESTATION_ISSUER="https://vci-attester.conformance-local"
+  else
+    ATTESTATION_ISSUER="https://vci-attester-${ENV_SLUG}.conformance-local"
+  fi
+  ATTESTATION_JSON_ANCHOR="$(printf '%s' "$ATTESTATION_ANCHOR" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  ATTESTATION_ISSUER_JSON="$(printf '%s' "$ATTESTATION_ISSUER" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  ATTESTATION_FIELDS=",\"allow_client_attestation\":true,\"client_attestation_trust_anchor_pem\":$ATTESTATION_JSON_ANCHOR,\"client_attestation_issuer\":$ATTESTATION_ISSUER_JSON"
+  # Pass 1: PUT the vci_haip profile (no issuance material yet) so the
+  # cert-host JWKS resolves the ES256 family (the tenant-plane filter).
+  ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
+    \"scope\":\"env\",
+    \"org_id\":\"$ORG_ID\",
+    \"env_id\":\"$ENV_ID\",
+    \"profile\":\"$PROFILE\",
+    $FLAGS,
+    \"require_pkce\":true,
+    \"signing_alg\":\"$ALG\",
+    \"refresh_rotation\":$ROTATION
+    $ATTESTATION_FIELDS_BASE
+  }" >/dev/null || true
+  # HAIP issuance chain (the credential/status x5c): the rig's
+  # issuance CA signs a LEAF on the ISSUER's ES256 public key (read
+  # from the live JWKS). The profile carries leaf (std-b64 DER) + CA
+  # (PEM); the harness pins the SAME CA as the credential/status trust
+  # anchor. The issuer never holds the CA key.
+  HAIP_JWKS="$(curl -sk "$CERT_AUTH_HOST/.well-known/jwks.json")"
+  HAIP_ISSUANCE_JSON="$(export HAIP_JWKS HAIP_ISSUER_URL="$CERT_AUTH_HOST"; python3 <<'PYGENHAIP'
+import os, json, base64, datetime
+import cryptography.hazmat.primitives.asymmetric.ec as ec
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.x509.oid import NameOID
+
+issuer_url = os.environ["HAIP_ISSUER_URL"]
+d = json.loads(os.environ["HAIP_JWKS"])
+import sys
+pub = next((k for k in d.get("keys", [])
+            if k.get("alg") == "ES256" and k.get("use") == "sig"), None)
+if pub is None:
+    sys.exit(0)
+x = int.from_bytes(base64.urlsafe_b64decode(pub["x"] + "=="), "big")
+y = int.from_bytes(base64.urlsafe_b64decode(pub["y"] + "=="), "big")
+pk = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+x_b64 = base64.urlsafe_b64encode(x.to_bytes(32, "big")).rstrip(b"=").decode()
+y_b64 = base64.urlsafe_b64encode(y.to_bytes(32, "big")).rstrip(b"=").decode()
+
+ca_key = ec.generate_private_key(ec.SECP256R1())
+now = datetime.datetime.now(datetime.timezone.utc)
+ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sentin8-haip-issuance-ca")])
+ca = (x509.CertificateBuilder()
+      .subject_name(ca_name).issuer_name(ca_name)
+      .public_key(ca_key.public_key())
+      .serial_number(x509.random_serial_number())
+      .not_valid_before(now - datetime.timedelta(days=1))
+      .not_valid_after(now + datetime.timedelta(days=3650))
+      .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+      .sign(ca_key, hashes.SHA256()))
+leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_url)])
+leaf = (x509.CertificateBuilder()
+        .subject_name(leaf_name).issuer_name(ca_name)
+        .public_key(pk)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .sign(ca_key, hashes.SHA256()))
+print(json.dumps({
+  "leaf_der_b64": base64.b64encode(leaf.public_bytes(serialization.Encoding.DER)).decode(),
+  "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
+  "x": x_b64,
+  "y": y_b64,
+  "kid": pub["kid"],
+}))
+PYGENHAIP
+)"
+  HAIP_LEAF_DER_B64="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['leaf_der_b64'])")"
+  HAIP_CA_PEM="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ca_pem'])")"
+  # x5c leaf PEM for the seed-out + the profile JSON fields.
+  HAIP_LEAF_PEM="$(python3 - "$HAIP_LEAF_DER_B64" <<'PYHAIPPEM'
+import sys, base64
+b64 = base64.b64encode(base64.b64decode(sys.argv[1])).decode()
+print("-----BEGIN CERTIFICATE-----")
+for i in range(0, len(b64), 64):
+    print(b64[i:i+64])
+print("-----END CERTIFICATE-----")
+PYHAIPPEM
+)"
+  HAIP_LEAF_JSON="$(printf '%s' "$HAIP_LEAF_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  HAIP_CHAIN_JSON="$(printf '%s' "$HAIP_CA_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  ATTESTATION_FIELDS="${ATTESTATION_FIELDS},\"issuance_leaf_pem\":${HAIP_LEAF_JSON},\"issuance_chain_pem\":${HAIP_CHAIN_JSON}"
+  HAIP_CA_PEM_EXPORTED="$HAIP_CA_PEM"
+  HAIP_LEAF_DER_B64_EXPORTED="$HAIP_LEAF_DER_B64"
+  HAIP_ISSUER_XY_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kid'], d['x'], d['y'])")"
+fi
 ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"scope\":\"env\",
     \"org_id\":\"$ORG_ID\",
@@ -221,19 +416,45 @@ ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"require_pkce\":true,
     \"signing_alg\":\"$ALG\",
     \"refresh_rotation\":$ROTATION
-  }" >/dev/null && log "profile=$PROFILE set ({$FLAGS}, $ALG, rotation=$ROTATION)"
+    $ATTESTATION_FIELDS
+  }" && log "profile=$PROFILE set ({$FLAGS}, $ALG, rotation=$ROTATION)"
 
-# ── 3. Certification user (idempotent sign-up in the CERT tenant) ──
+# ── 2c. TLS warm-up (runbook §5): the suite's Java client makes
+# single-shot fetches with a short socket timeout; a cold auth instance
+# must first fetch the tenant's leaf from Acme on-demand (~100ms when
+# Acme is warm, seconds when its own boot races). One warm-up request
+# lands the cert in the auth instance's resolver BEFORE ANY other call
+# (the sign-up + DCR go to the SAME host - a cold leaf would fail them).
+log "warming TLS cert for $CERT_AUTH_HOST"
+curl -sk -m 20 -o /dev/null --retry 3 --retry-delay 2 \
+  "$CERT_AUTH_HOST/.well-known/openid-configuration" \
+  && log "TLS cert warm"
+
+# ── 3. Certification user (idempotent sign-up in the target TENANT) ──
 # The suite drives the user's sign-in through the browser UI; the
-# sign-up itself provisions into the tenant resolved from the cert
-# env's own auth hostname (the signup path reads the tenant from the
-# hostname, matching browser behavior).
-CERT_AUTH_HOST="https://auth.cert.conformance-local.local.sentin8.dev"
-log "ensuring certification user $USER_EMAIL (cert tenant)"
+# sign-up itself provisions into the tenant resolved from the env's own
+# auth hostname (the signup path reads the tenant from the hostname,
+# matching browser behavior). One user email per env (OC-20).
+log "ensuring certification user $USER_EMAIL ($ENV_SLUG tenant)"
+SUP_RC=0
 "$CLI" signup --sentin8-auth-url "$CERT_AUTH_HOST" \
   --email "$USER_EMAIL" --password "$USER_PASSWORD" \
-  --first-name "Conformance" --last-name "Certification" \
-  || log "sign-up says exists - continuing"
+  --first-name "Conformance" --last-name "Certification" || SUP_RC=$?
+# The 'exists' case continues (409/40x from a prior seed); a CONNECT/
+# transport error (the CLI's 'error sending request' form) = FATAL - a
+# silent continue left envs without a user and the whole family's
+# modules failing later (the cert-ciba seed + 401 chain).
+if [ "$SUP_RC" != "0" ]; then
+  if "$CLI" signup --sentin8-auth-url "$CERT_AUTH_HOST" \
+    --email "$USER_EMAIL" --password "$USER_PASSWORD" \
+    --first-name "Conformance" --last-name "Certification" >/dev/null 2>&1 \
+    || echo "$SUP_RC" | grep -qE '^(4[0-9][0-9]|2)$'; then
+    log "sign-up says exists - continuing"
+  else
+    log "FATAL: cert user sign-up failed (rc=$SUP_RC - not an exists case)"
+    exit 1
+  fi
+fi
 
 # ── 3. Conformance clients (DCR endpoint - same path Dynamic OP runs) ─
 # Registered via DCR so the exact registration surface under test is the
@@ -252,26 +473,26 @@ dcr() { # dcr <name> <json-extra>
   # refresh_token pair is invalid for a CIBA-only client); JSON forbids
   # duplicate fields, so the base pair is omitted whenever the extra
   # supplies its own grant_types.
-  local grants="\"grant_types\":[\"authorization_code\",\"refresh_token\"],"
+  local grants=",\"grant_types\":[\"authorization_code\",\"refresh_token\"]"
   if [[ "$extra" == *'"grant_types"'* ]]; then grants=""; fi
   # Same rule for redirect_uris: the extra may supply its own array
   # (e.g. the happy-flow client2's query-parameter variant).
-  local uris="\"redirect_uris\":[\"$CALLBACK\"],"
-  if [[ "$extra" == *'"redirect_uris"'* ]]; then uris=""; fi
-  # Same duplicate-field rule for scope (serde rejects duplicates - the
-  # VCI clients carry their own credential scopes).
-  local scope="\"scope\":\"openid profile email phone address offline_access\","
-  if [[ "$extra" == *'"scope"'* ]]; then scope=""; fi
-  local body="{
-    \"client_name\":\"$name\",
-    $uris
-    $grants
-    \"response_types\":[\"code\"],
-    $scope
-    \"code_challenge_method\":\"S256\",
-    \"consent_required\":$CONSENT_REQUIRED${extra:+,$extra}
-  }"
-  # banner-strip not needed (curl output); parse client fields with jget.
+  # Duplicate-field rules: the extras may override the base members, so
+  # the base fragment drops out when the extra supplies the same key.
+  local parts=()
+  parts+=("\"client_name\":\"$name\"")
+  if [[ "$extra" != *'"redirect_uris"'* ]]; then parts+=("\"redirect_uris\":[\"$CALLBACK\"]"); fi
+  if [[ "$extra" != *'"grant_types"'* ]]; then parts+=("\"grant_types\":[\"authorization_code\",\"refresh_token\"]"); fi
+  parts+=("\"response_types\":[\"code\"]")
+  if [[ "$extra" != *'"scope"'* ]]; then parts+=("\"scope\":\"openid profile email phone address offline_access\""); fi
+  parts+=("\"code_challenge_method\":\"S256\"")
+  if [[ "$extra" != *'"consent_required"'* ]]; then parts+=("\"consent_required\":$CONSENT_REQUIRED"); fi
+  # Join with commas into the final body.
+  local body
+  body=$(printf '%s\n' "${parts[@]}" | paste -sd, -)
+  if [[ -n "$extra" ]]; then body="$body,$extra"; fi
+  body="{$body}"
+  # Banner-strip not needed (curl output); parse client fields with jget.
   curl -sk -X POST "$CERT_AUTH_HOST/oauth/register" \
     -H 'Content-Type: application/json' -d "$body"
 }
@@ -326,15 +547,20 @@ CIBA_PRIV=$(echo "$CIBA_KEYS" | python3 -c "import json,sys; print(json.dumps(js
 CIBA_PING_URL="${CALLBACK%/callback}/ciba-notification-endpoint"
 CIBA_JSON="$(dcr "cert-ciba" "\"grant_types\":[\"urn:openid:params:grant-type:ciba\",\"refresh_token\"],\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$CIBA_PUB,\"backchannel_client_notification_endpoint\":\"$CIBA_PING_URL\"")"
 
-# Client ids/secrets print AND persist (.tmp/conformance/seed-out.txt -
-# the OIDF automation harness reads it for the suite plan configs).
-SEED_OUT="$TMP/seed-out.txt"
-: > "$SEED_OUT"
+# Client ids/secrets print AND persist (the SEED_OUT path resolved at
+# the env-slug block above - the OIDF automation harness reads it for
+# the suite plan configs).
+echo "private_jwks(vciatt)=$VCIATT_PRIV" >> "$SEED_OUT"
+echo "public_jwks(vciatt)=$VCIATT_PUB" >> "$SEED_OUT"
+echo "attester_pem(vciatt)=$VCIATT_PEM" >> "$SEED_OUT"
+[ -n "${HAIP_CA_PEM_EXPORTED:-}" ] && echo "haip_issuer_ca_pem(haip)=$HAIP_CA_PEM_EXPORTED" >> "$SEED_OUT"
+[ -n "${HAIP_LEAF_DER_B64_EXPORTED:-}" ] && echo "haip_issuer_leaf_der_b64(haip)=$HAIP_LEAF_DER_B64_EXPORTED" >> "$SEED_OUT"
+[ -n "${HAIP_ISSUER_XY_EXPORTED:-}" ] && echo "haip_issuer_xy(haip)=$HAIP_ISSUER_XY_EXPORTED" >> "$SEED_OUT"
+echo "attestation_issuer(vciatt)=${ATTESTATION_ISSUER:-https://vci-attester.conformance-local}" >> "$SEED_OUT"
 emit_client() { # emit_client <name> <json>
   echo "client_id($1)=$(jget "$2" client_id)" | tee -a "$SEED_OUT"
   echo "client_secret($1)=$(jget "$2" client_secret)" | tee -a "$SEED_OUT"
 }
-echo "private_jwks(ciba)=$CIBA_PRIV" >> /dev/null 2>&1 || true
 # CIBA second client - the suite's AbstractFAPICIBAID1MultipleClient
 # family (signed-by-other-client / bad-iss / multiple hints) drives a
 # SECOND registered client: a distinct id + its OWN keypair (the
@@ -397,55 +623,15 @@ VCI_PUB1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json
 VCI_PUB2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['pub2']))")
 VCI_PRIV1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p1']))")
 VCI_PRIV2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p2']))")
-VCI_SCOPE='openid profile email offline_access credential:VerifiedPersonCredential credential:VerifiedEmployeeCredential'
-VCI_JSON="$(dcr "cert-vci" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB1,\"scope\":\"$VCI_SCOPE\"")"
-VCI2_JSON="$(dcr "cert-vci-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB2,\"scope\":\"$VCI_SCOPE\"")"
+VCI_SCOPE='openid profile email offline_access credential:VerifiedPersonCredential credential:VerifiedEmployeeCredential eudi.pid.1 eudi.pid.1.nobinding eudi.pid.1.attestation eudi.pid.1.jwt.keyattest eudi.pid.1.attestation.keyattest eudi.pid.1.jwt_and_attestation.keyattest openid.example.cert.1'
+VCI_JSON="$(dcr "cert-vci" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB1,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true")"
+VCI2_JSON="$(dcr "cert-vci-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB2,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true")"
 emit_client vci "$VCI_JSON"
 emit_client vci2 "$VCI2_JSON"
 echo "private_jwks(vci)=$VCI_PRIV1" >> "$SEED_OUT"
 echo "private_jwks(vci2)=$VCI_PRIV2" >> "$SEED_OUT"
 
-# OID4VCI key-ATTESTATION issuer key (the rig plays the attester): the
-# suite signs key-attestation+jwt with this key and the plan config
-# publishes its PUBLIC JWKS as vci_key_attestation_jwks (the trusted
-# attester set). The private form goes to seed-out for the harness.
-VCIATT_KEYS="$(python3 - <<'PYGENVCIATT'
-import base64, datetime, json
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
 
-key = ec.generate_private_key(ec.SECP256R1())
-pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
-y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
-d = key.private_numbers().private_value.to_bytes(32, 'big')
-d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
-kid = 'vci-attester-key'
-# The attestation signer key needs an x5c chain (VCIGenerateKeyAttestation:
-# "A x5c entry is required in the client's signing key"). Self-issue a
-# leaf certificate for the attester and embed the DER chain base64.
-name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'vci-attester.conformance-local.local.sentin8.dev')])
-now = datetime.datetime.now(datetime.timezone.utc)
-cert = (x509.CertificateBuilder()
-        .subject_name(name).issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(days=1))
-        .not_valid_after(now + datetime.timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .sign(key, hashes.SHA256()))
-x5c = [base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()]
-private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256", "x5c": x5c}
-public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y, "x5c": x5c}]}
-print(json.dumps({"private": private, "public": public}))
-PYGENVCIATT
-)"
-VCIATT_PRIV=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")
-VCIATT_PUB=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")
-echo "private_jwks(vciatt)=$VCIATT_PRIV" >> "$SEED_OUT"
-echo "public_jwks(vciatt)=$VCIATT_PUB" >> "$SEED_OUT"
 echo "private_jwks(ciba)=$CIBA_PRIV" >> "$SEED_OUT"
 echo "private_jwks(ciba2)=$CIBA2_PRIV" >> "$SEED_OUT"
 echo "org_id=$ORG_ID" >> "$SEED_OUT"
@@ -468,18 +654,21 @@ if [[ "$PROFILE" == fapi_* ]]; then
     for cl in main second; do
       KEYJSON="$(python3 - <<'PYGEN'
 import base64, json
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-key = ec.generate_private_key(ec.SECP256R1())
-pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
-y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
-d = key.private_numbers().private_value.to_bytes(32, 'big')
-d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+# FAPI2 client key = RSA-PS256 (auth DESIGN 9a.16 (i)): the FAPI2-BSA
+# signs client assertions/request objects with ES256/PS256; the suite's
+# alg-gated negatives (ensure-signed-...-with-RS256-fails) run ONLY
+# against a PS256-keyed client (JWKUtil.getAlgFromClientJwks == 'PS256')
+# - the RS256 re-signing (ChangeClientJwksAlgToRS256) then resolves with
+# the AS's reject (the alg mandate).
+key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rn = key.public_key().public_numbers()
+def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
 kid = 'fapi2-key'
-private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
-public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+private = {"kty": "RSA", "kid": kid, "n": _bn(rn.n), "e": _bn(rn.e), "d": _bn(key.private_numbers().d), "alg": "PS256"}
+public = {"keys": [{"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
 print(json.dumps({"private": private, "public": public}))
 PYGEN
 )"
@@ -496,8 +685,14 @@ PYGEN
       else
         # The happy-flow's client2 uses the callback WITH extra
         # query parameters - the SUITE requires that exact URI
-        # registered (not a prefix match). Register it verbatim.
-        FJSON2="$(dcr "cert-fapi2-$cell-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\"]")"
+        # registered (not a prefix match). The request_uri-bound-
+        # to-client NEGATIVE sends client2 with the PLAIN callback
+        # (the suite's config.client2.redirect_uri) and expects the
+        # error redirect THERE - client2 registers BOTH (exact-string
+        # match per entry; the dummy preserves the happy-flow
+        # verbatim requirement, the plain callback is the negative's
+        # error target).
+        FJSON2="$(dcr "cert-fapi2-$cell-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
         emit_client "fapi2-second-$cell" "$FJSON2"
         echo "private_jwks(fapi2-second-$cell)=$PRIVJWKS" >> "$SEED_OUT"
       fi
@@ -520,7 +715,7 @@ if [[ "$PROFILE" == fapi_* ]]; then
     CERTJSON="$(python3 - <<'PYMTLS'
 import base64, hashlib, json
 from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa as rsa_mod
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
 import datetime
@@ -554,8 +749,13 @@ x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
 y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
 d = sig_key.private_numbers().private_value.to_bytes(32, 'big')
 d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
-private_jwks = {"kty": "EC", "kid": "fapi2-mtls-key", "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
-public_jwks = {"keys": [{"kty": "EC", "kid": "fapi2-mtls-key", "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+# The mtls cell's signing jwks = RSA-PS256 as well (auth DESIGN 9a.16
+# (i)); the client CERTIFICATE stays the EC P-256 self-signed leaf.
+rsig = rsa_mod.generate_private_key(public_exponent=65537, key_size=2048)
+rsn = rsig.public_key().public_numbers()
+def _bn2(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
+private_jwks = {"kty": "RSA", "kid": "fapi2-mtls-key", "n": _bn2(rsn.n), "e": _bn2(rsn.e), "d": _bn2(rsig.private_numbers().d), "alg": "PS256"}
+public_jwks = {"keys": [{"kty": "RSA", "kid": "fapi2-mtls-key", "use": "sig", "alg": "PS256", "n": _bn2(rsn.n), "e": _bn2(rsn.e)}]}
 print(json.dumps({"cert_pem": cert.public_bytes(serialization.Encoding.PEM).decode(),
                   "key_pem": cert_key.private_bytes(serialization.Encoding.PEM,
                                                     serialization.PrivateFormat.PKCS8,
@@ -580,7 +780,7 @@ PYMTLS
       MJSON="$(dcr "cert-fapi2-mtls" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS")"
       emit_client "fapi2-mtls" "$MJSON"
     else
-      MJSON2="$(dcr "cert-fapi2-mtls-2" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\"]")"
+      MJSON2="$(dcr "cert-fapi2-mtls-2" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
       emit_client "fapi2-second-mtls" "$MJSON2"
     fi
     echo "mtls_cert_pem($cl)=$CERT_PEM" >> "$SEED_OUT"
@@ -591,15 +791,6 @@ PYMTLS
   done
 fi
 
-# ── 3a. TLS warm-up (runbook §5): the suite's Java client makes
-# single-shot fetches with a short socket timeout; a cold auth instance
-# must first fetch the tenant's leaf from Acme on-demand (~100ms when
-# Acme is warm, seconds when its own boot races). One warm-up request
-# lands the cert in the auth instance's resolver BEFORE the suite runs.
-log "warming TLS cert for $CERT_AUTH_HOST"
-curl -sk -m 20 -o /dev/null --retry 3 --retry-delay 2 \
-  "$CERT_AUTH_HOST/.well-known/openid-configuration" \
-  && log "TLS cert warm"
 
 # ── 3b. Cert user phone + postal address (no-skip rule, auth DESIGN
 # §9a.10) ── The OIDF scope tests assert claim PRESENCE for the
@@ -648,8 +839,9 @@ else
 fi
 
 # ── 4. Persist the suite configuration inputs ─────────────────────────
-cat > "$TMP/cert-user.env" <<EOF
+cat > "$CERT_USER_ENV" <<EOF
 # OIDF conformance suite - certification tenant inputs (generated)
+CONFORMANCE_ENV_SLUG=$ENV_SLUG
 CONFORMANCE_ALIAS=$ALIAS
 CONFORMANCE_CALLBACK=$CALLBACK
 CONFORMANCE_USER_EMAIL=$USER_EMAIL
@@ -657,6 +849,6 @@ CONFORMANCE_USER_PASSWORD=$USER_PASSWORD
 CONFORMANCE_ORG_ID=$ORG_ID
 CONFORMANCE_ENV_ID=$ENV_ID
 EOF
-chmod 600 "$TMP/cert-user.env"
-log "wrote $TMP/cert-user.env"
+chmod 600 "$CERT_USER_ENV"
+log "wrote $CERT_USER_ENV"
 log "next: open https://localhost.emobix.co.uk:8443/ and create the test plans (runbook §4)"

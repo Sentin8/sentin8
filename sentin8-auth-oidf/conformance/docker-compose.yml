@@ -54,6 +54,19 @@ services:
       # yields an IPv6 form first on some setups and the JVM prefers
       # it, dying with "Network is unreachable" while curl works.
       - "auth.cert.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      # Profile-per-env (DESIGN §9a.2, OC-20): one extra_hosts line per
+      # family env's auth host - the suite's JVM calls the OP under the
+      # env's own hostname (discovery, PAR, token, DCR). New family envs
+      # ADD a line here (the seed's TLS warm-up + the suite's calls
+      # resolve this exact hostname inside the container; the wildcard
+      # 127.0.0.1 answer would pin the JVM to itself - "Network is
+      # unreachable" with the IPv6 host-gateway form).
+      - "auth.cert-fapi2.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-f2m.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-fapi1.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-ciba.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-vci.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-haip.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.ops.sys.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
     environment:
       SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/conformance

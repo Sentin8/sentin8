@@ -85,7 +85,8 @@ space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-one start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
-	conformance-up conformance-down conformance-purge conformance-seed
+	conformance-up conformance-down conformance-purge conformance-seed \
+       conformance-seed-all conformance-all
 
 help: ## Show this help
 	@echo "sentin8/ platform group"
@@ -297,3 +298,9 @@ heads: ## Per-repo HEADs
 		[ -d "$$d/.git" ] || continue; \
 		printf "%-22s %s\n" "$$d" "$$(git -C $$d log --oneline -1 2>/dev/null | head -c 60)"; \
 	done
+
+conformance-seed-all: ## Provision EVERY family env (profile-per-env, OC-20 - one env + alias per family)
+	bash sentin8-auth-oidf/conformance/conformance-seed-all.sh
+
+conformance-all: ## Run the WHOLE battery (each family against its own env; seed first: conformance-seed-all)
+	bash sentin8-auth-oidf/conformance/conformance-run-all.sh
