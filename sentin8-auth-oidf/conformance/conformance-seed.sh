@@ -209,7 +209,7 @@ case "$PROFILE" in
   fapi_*) CONSENT_REQUIRED="true";;
 esac
 case "$PROFILE" in
-  fapi_2|fapi_2_message_signing|fapi_ciba|vci|vci_haip) ALG="ES256";;
+  fapi_2|fapi_2_message_signing|fapi_1_advanced|fapi_ciba|vci|vci_haip) ALG="ES256";;
 esac
 log "setting env security profile to $PROFILE"
 # Per-profile flag posture (auth DESIGN §9a.5/§9a.3; OC-13): the flags
@@ -445,13 +445,19 @@ SUP_RC=0
 # silent continue left envs without a user and the whole family's
 # modules failing later (the cert-ciba seed + 401 chain).
 if [ "$SUP_RC" != "0" ]; then
-  if "$CLI" signup --sentin8-auth-url "$CERT_AUTH_HOST" \
+  # Classify by the CLI's OWN error text: a 409 CONFLICT surfaces as
+  # 'email already registered: <email>' (CLI src/auth.rs). Retry once
+  # with the output CAPTURED - the message plane, not the exit-1 plane,
+  # decides exists vs FATAL (a transport error's text has no such line).
+  SUP_RETRY_OUT="$($CLI signup --sentin8-auth-url "$CERT_AUTH_HOST" \
     --email "$USER_EMAIL" --password "$USER_PASSWORD" \
-    --first-name "Conformance" --last-name "Certification" >/dev/null 2>&1 \
-    || echo "$SUP_RC" | grep -qE '^(4[0-9][0-9]|2)$'; then
+    --first-name "Conformance" --last-name "Certification" 2>&1 || true)"
+  if echo "$SUP_RETRY_OUT" | grep -q 'email already registered'; then
     log "sign-up says exists - continuing"
+  elif echo "$SUP_RETRY_OUT" | grep -q 'email already registered\|Account created'; then
+    log "sign-up retry resolved - continuing"
   else
-    log "FATAL: cert user sign-up failed (rc=$SUP_RC - not an exists case)"
+    log "FATAL: cert user sign-up failed (rc=$SUP_RC: $(echo "$SUP_RETRY_OUT" | head -2 | tr '\n' ' '))"
     exit 1
   fi
 fi
