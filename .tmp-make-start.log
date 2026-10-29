@@ -1,0 +1,4 @@
+→ captain up — starting the platform core via API (idempotent)
+sentin8-cli v0.1.0 (build c60ed0d)
+Started 1 services:
+  → sentin8:sign started

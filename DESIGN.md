@@ -105,7 +105,7 @@ sequenceDiagram
   ConnectionManager-based client needed. The factory/membus/registry/
   discovery/metrics surfaces keep their method shapes (GLIDE mirrors
   the typed-command API) so call sites migrate mechanically.
-- **URL derivation (VALKEYDERIVE-1)**: a Valkey URL under certificate
+- **URL derivation **: a Valkey URL under certificate
   identity is pure structure - scheme + host + port; the client
   certificate authenticates and the per-workload ACL namespaces
   authorize, so no secret component exists. The URL the SDK factory
@@ -185,7 +185,7 @@ sequenceDiagram
 - **SQLX feature**: every workspace `Cargo.toml` enables sqlx's
   `tls-rustls-ring` feature (sqlx 0.8 compiles NO TLS support without
   it; DSNs may gain `sslmode=verify-full`).
-- **DSN derivation (DSNDERIVE-1)**: under certificate identity a
+- **DSN derivation **: under certificate identity a
   service DSN is PURE STRUCTURE - role + host + database, no secret -
   so every service's DSN derives from the `service_type` it already
   hardcodes in `main.rs`: `sentin8_config::service_database_url(
@@ -220,7 +220,7 @@ sequenceDiagram
   enroll platform-grants block therefore converges
   `GRANT SELECT, INSERT, UPDATE ON sys.policy_sets` to every
   `sentin8_%_service` platform role (mirroring the vertical substrate's
-  VDC-6 loop - auth's provisioning endpoint exercises it at env
+  loop - auth's provisioning endpoint exercises it at env
   creation, before the event-driven env-init refresh lands).
 - **Client cert EKU**: the m2m workload pairs already carry `ClientAuth`
   EKU (`sign_client_leaf`) - PostgreSQL's client-cert verification
@@ -306,10 +306,10 @@ warning on timeout - never a boot hang (D6).
 
 ## 7. Invariants
 
-- Starters link no service binary - they exec/spawn them (RS-2).
-- A service repo's `Cargo.toml` carries zero path deps (RS-5).
+- Starters link no service binary - they exec/spawn them .
+- A service repo's `Cargo.toml` carries zero path deps .
 - The SDK plane contains no service binary and no registration file
-  (RS-6).
+  .
 - The group folder is a plain directory - never a git repo or workspace.
 
 ## 8. Testing Strategy
@@ -320,7 +320,7 @@ Cross-service flows: `sentin8-e2e` (Playwright, UI-only per AGENTS.md).
 
 ## 9. Open Questions
 
-- RS-4 (D7 owner-API conversions) - see the split backlog.
+- (D7 owner-API conversions) - see the split design.
 
 ---
 

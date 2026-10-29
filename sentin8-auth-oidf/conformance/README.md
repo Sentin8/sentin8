@@ -6,7 +6,7 @@
 
 
 > Scope: everything Sentin8:Auth implements **except Front-Channel
-> Logout and Implicit/Hybrid OP** (deliberate design exclusions — see
+> Logout and Implicit/Hybrid OP** (deliberate design exclusions - see
 > `sentin8-auth/DESIGN.md` §9a). The OIDF suite is free to run; the
 > open-source fee waiver applies at submission time.
 
@@ -18,7 +18,7 @@
   classical mode** so the suite's Java client can talk to it:
   `SENTIN8_TLS_PQ_MODE=classical` in the root `.env` for rig runs
   (the platform's emergency-rollback mode: TLS 1.2/1.3 classical
-  groups + RS256 JWT signing — the same protocol logic, suite-visible
+  groups + RS256 JWT signing - the same protocol logic, suite-visible
   algorithms).
 - The Acme root CA trusted by the suite's Java runtime: import
   `.run/secrets/acme-ca/root-ca.crt` into the server container
@@ -43,7 +43,7 @@ is expected; accept it).
 
 ## 3. Seed the certification tenant (no direct SQL)
 
-Provision through the platform's own API surface — the same rule as the
+Provision through the platform's own API surface - the same rule as the
 E2E suite applies (no `psql`, no direct DB writes):
 
 ```bash

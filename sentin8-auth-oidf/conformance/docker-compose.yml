@@ -54,7 +54,7 @@ services:
       # yields an IPv6 form first on some setups and the JVM prefers
       # it, dying with "Network is unreachable" while curl works.
       - "auth.cert.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
-      # Profile-per-env (DESIGN §9a.2, OC-20): one extra_hosts line per
+      # Profile-per-env (DESIGN §9a.2,): one extra_hosts line per
       # family env's auth host - the suite's JVM calls the OP under the
       # env's own hostname (discovery, PAR, token, DCR). New family envs
       # ADD a line here (the seed's TLS warm-up + the suite's calls
@@ -100,7 +100,7 @@ services:
       - server
     ports:
       - "8443:8443"
-    # OIDF-CERT-1 / auth DESIGN §9a.2 step 1b: the suite image hardcodes a
+    # / auth DESIGN §9a.2 step 1b: the suite image hardcodes a
     # self-signed CN=localhost cert no browser trusts (front-channel
     # browser tests + the operator's plan tab died on ERR_CERT_AUTHORITY_INVALID).
     # Bind-mount the platform-CA leaf (CN conformance-suite, SAN

@@ -24,14 +24,14 @@ SERVICES := auth acme proxy bus db storage post stat secrets sign func cron flow
 # equivalent *-release / *-debug wrapper targets defined further below.
 RELEASE ?=
 
-# ── Build identity stamps (BUILDID-1, sentin8-build-info README) ────────
+# ── Build identity stamps (sentin8-build-info README) ────────
 # Every cargo invocation through this Makefile is stamped with the repo's
 # own git short hash (SENTIN8_GIT_SHA) and the active cargo profile
 # (SENTIN8_BUILD_PROFILE), which sentin8-build-info bakes into the binary
 # via option_env! — banners and /v1/health then render
 # `{version}+{hash}[.d]` so operators can verify WHICH binary runs.
 #
-# DELIVERY SHAPE (STATUSID-1): the stamps ride the SAME shell line as
+# DELIVERY SHAPE : the stamps ride the SAME shell line as
 # the cargo command — make runs each recipe LINE in its own shell, so
 # the original multi-line `define` (an `export …` recipe line before the
 # cargo line) evaporated before cargo started and stamped NOTHING.
@@ -56,7 +56,7 @@ RELEASE ?=
 # The hash resolves via PLAIN `git rev-parse` (no -C path): the stamp
 # expands on the same shell line AFTER the `cd`, so a repo-relative
 # `git -C <repo>` would resolve from INSIDE the repo and miss, stamping
-# every binary EMPTY (the first STATUSID-1 delivery did exactly that).
+# every binary EMPTY (the first delivery did exactly that).
 # The call argument is documentary — it names the repo the stamp
 # applies to; the expansion itself is cwd-based.
 stamp_env = SENTIN8_BUILD_PROFILE=$(if $(RELEASE),release,debug) SENTIN8_GIT_SHA=$$(git rev-parse --short HEAD 2>/dev/null)
@@ -145,7 +145,7 @@ clean: ## Clean every child repo (target/, build artifacts, local .run/.tmp)
 # then start the other profile. Vertical catalogs ride
 # SENTIN8_CAPTAIN_CATALOG_PATHS from the root .env.
 
-# STARTSCOPE-1 (RS §4.5.2): this group's boot scope — the platform CORE
+# (RS §4.5.2): this group's boot scope — the platform CORE
 # only (the 19 sentin8:* service types below; captain boot-skips its own
 # entry; vertical services are NEVER booted from the platform group's
 # start — their databases and enrollment belong to their own groups'
@@ -154,7 +154,7 @@ clean: ## Clean every child repo (target/, build artifacts, local .run/.tmp)
 # via its group Makefile or `captain start <vertical type>`.
 #
 # The pin is passed as ONE comma-joined argument in BOTH branches
-# (STARTSCOPE-3, CLI DESIGN §4.1): the CLI splits/canonicalizes it into
+# (CLI DESIGN §4.1): the CLI splits/canonicalizes it into
 # the start-services list (captain up) or the sentin8-boot allow-list
 # (captain down). The CLI owns the cold-boot `SENTIN8_SERVICES` export —
 # the Makefile never sets it.
@@ -207,7 +207,7 @@ infra-up: ## Start dev PostgreSQL 18 + Valkey (THE tree-wide infra, §2.2.1)
 infra-down: ## Stop the dev infra
 	@docker compose down
 
-# fleet-up (FLEET-5, captain DESIGN §11.7): the multi-machine dev entry.
+# fleet-up (captain DESIGN §11.7): the multi-machine dev entry.
 # Boots the base fleet trimmed to the placement-minimal set (acme/auth/
 # proxy are pinned singletons; everything else stays available to the
 # remote-spawn plane). The docker backend + macvlan prerequisites are in
@@ -289,7 +289,7 @@ conformance-up: start-conformance ## Start the OIDF conformance suite stack (mon
 	# (copied into the build context by this target; the derived image
 	# imports it with keytool - a bind mount alone does not reach the JVM).
 	cp -f ../.run/secrets/acme-ca/root-ca.crt sentin8-auth-oidf/conformance/root-ca.crt
-	# OIDF-CERT-1 (auth DESIGN §9a.2 step 1b): the suite's nginx serves a
+	# (auth DESIGN §9a.2 step 1b): the suite's nginx serves a
 	# platform-CA leaf (CN conformance-suite, SAN localhost.emobix.co.uk)
 	# instead of the image's self-signed cert - minted by `make infra-tls`,
 	# mounted read-only by the compose nginx service over the image paths.

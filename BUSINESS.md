@@ -74,7 +74,7 @@
 ## 8. Open Business Questions
 
 - Remote hosting (GitHub org + tag renaming) when repos are pushed.
-- RS-4 owner-API conversions (cross-schema grant retirement).
+- owner-API conversions (cross-schema grant retirement).
 
 ---
 

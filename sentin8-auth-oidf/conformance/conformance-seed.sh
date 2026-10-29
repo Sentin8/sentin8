@@ -23,7 +23,7 @@
 #   .tmp/conformance/cert-user-<env-slug>.env - test user credentials
 #   stdout                           - org/env ids + client registrations
 #
-# Profile-per-env (DESIGN §9a.2, OC-20): each family seeds its OWN env
+# Profile-per-env (DESIGN §9a.2,): each family seeds its OWN env
 # (env slug + suite alias via CONFORMANCE_ENV_SLUG / CONFORMANCE_ALIAS;
 # defaults = env `cert` + alias `sentin8-local`, the standard family).
 # The env slug must be DNS-ALPHA (lowercase [a-z0-9-]); the suite alias
@@ -35,7 +35,7 @@
 set -euo pipefail
 
 # The script lives in sentin8-auth-oidf/conformance/ (moved from
-# scripts/conformance - OC-13): the SAME directory depth as before, so the
+# scripts/conformance -): the SAME directory depth as before, so the
 # group root (sentin8/) is still two levels up.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # repo group root (sentin8/)
 TMP="$ROOT/../.tmp/conformance"
@@ -57,7 +57,7 @@ ALIAS="${CONFORMANCE_ALIAS:-sentin8-local}"
 ENV_SLUG="${CONFORMANCE_ENV_SLUG:-cert}"
 ORG_SLUG="conformance-local"
 DOMAIN_SUFFIX="local.sentin8.dev"
-# The per-env tenant identity (OC-20): the auth host + the user email
+# The per-env tenant identity : the auth host + the user email
 # derive from the ENV SLUG; the suite callback/alias from the ALIAS.
 ENV_SLUG_ALPHA_OK="$(printf '%s' "$ENV_SLUG" | grep -cE '^[a-z0-9][a-z0-9-]*$' || true)"
 ALIAS_URL_OK="$(printf '%s' "$ALIAS" | grep -cE '^[a-z0-9][a-z0-9-]*$' || true)"
@@ -69,7 +69,7 @@ CALLBACK="https://localhost.emobix.co.uk:8443/test/a/${ALIAS}/callback"
 USER_EMAIL="${CONFORMANCE_USER_EMAIL:-cert-user@${ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}}"
 USER_PASSWORD="${CONFORMANCE_USER_PASSWORD:-Certification!2026}"
 CERT_AUTH_HOST="https://auth.${ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}"
-# Per-env seed-out (OC-20): env `cert` keeps the FLAT legacy paths (the
+# Per-env seed-out : env `cert` keeps the FLAT legacy paths (the
 # single-env flows + the specs' fallback paths read them); every other
 # env writes into seed-out/<slug>.txt (+ cert-user-<slug>.env).
 if [ "$ENV_SLUG" = "cert" ]; then
@@ -212,7 +212,7 @@ case "$PROFILE" in
   fapi_2|fapi_2_message_signing|fapi_1_advanced|fapi_ciba|vci|vci_haip) ALG="ES256";;
 esac
 log "setting env security profile to $PROFILE"
-# Per-profile flag posture (auth DESIGN §9a.5/§9a.3; OC-13): the flags
+# Per-profile flag posture (auth DESIGN §9a.5/§9a.3;): the flags
 # ride the TARGET profile - not the `standard` subset for every run.
 # `standard` = plain OIDC Core (RS256, everything off). The FAPI
 # postures turn on exactly what their certification profile mandates.
@@ -309,7 +309,7 @@ ATTESTATION_FIELDS_BASE=""
 ATTESTATION_JSON_ANCHOR=""
 if [ "$PROFILE" == "vci_haip" ]; then
   ATTESTATION_ANCHOR="$VCIATT_PEM"
-  # The attester identity rides the ENV (OC-20): env `cert` keeps the
+  # The attester identity rides the ENV : env `cert` keeps the
   # legacy form (the specs' hardcoded constant); other envs suffix the
   # slug. The specs read `attestation_issuer(vciatt)` from seed-out -
   # matching rows override the constant.
@@ -434,7 +434,7 @@ curl -sk -m 20 -o /dev/null --retry 3 --retry-delay 2 \
 # The suite drives the user's sign-in through the browser UI; the
 # sign-up itself provisions into the tenant resolved from the env's own
 # auth hostname (the signup path reads the tenant from the hostname,
-# matching browser behavior). One user email per env (OC-20).
+# matching browser behavior). One user email per env .
 log "ensuring certification user $USER_EMAIL ($ENV_SLUG tenant)"
 SUP_RC=0
 "$CLI" signup --sentin8-auth-url "$CERT_AUTH_HOST" \
@@ -634,7 +634,7 @@ VCI_JSON="$(dcr "cert-vci" "\"token_endpoint_auth_method\":\"private_key_jwt\",\
 # client2 registers BOTH forms: the AddRedirectUriQuerySuffix cell presents
 # <callback>?dummy1=lorem&dummy2=ipsum and the suite asserts the suffixed uri
 # IS registered ("the redirect url, including this suffix, must be registered
-# for the client") - the OC-22 exact-match rule rejects any query-bearing
+# for the client") - the exact-match rule rejects any query-bearing
 # variant that is not itself registered.
 VCI2_JSON="$(dcr "cert-vci-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB2,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
 emit_client vci "$VCI_JSON"
