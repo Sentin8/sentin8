@@ -32,6 +32,9 @@
 | Orchestration | `sentin8-sys`, `sentin8-app` | Orgs, environments, app store |
 | Client access | `sentin8-bff`, `sentin8-web` | Tokens never reach browsers; app hosting |
 | AI | `sentin8-ai` | Embeddings/completions as a shared capability |
+| Self-healing boot | `make start` (provision-on-boot) | A reset never leaves the platform half-provisioned: the boot the operator already runs converges every service's identity rows automatically |
+| Stable UI delivery | `make build` + served Flutter bundles | The sign-in/admin UI never silently disappears between resets - missing bundles are rebuilt or named loudly at boot |
+| One instance per service | captain duplicate-instance sweep | The ingress can never round-robin a healthy and a broken copy of the same service - the fleet self-converges |
 
 ## 3. What the Group Does NOT Own
 
@@ -68,7 +71,10 @@
 ## 7. Acceptance Criteria
 
 1. All 25 platform-group repos build independently from their git pins.
-2. `make infra-up && make build` in this folder is a working day-1 loop.
+2. `make infra-up && make build && make start` in this folder is a working
+   day-1 loop - and repeating it after a total data wipe (`dev-destroy`)
+   converges back to a fully-provisioned platform with no manual enroll
+   step (provision-on-boot).
 3. Vertical groups consume this group via `sentin8-sdk` git tag only.
 
 ## 8. Open Business Questions

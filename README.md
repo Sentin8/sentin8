@@ -41,9 +41,16 @@ directory (RS §4.4).
 
 ```bash
 make infra-up      # TLS-only PG 18 + Valkey (infra-tls mint → compose up)
-make build         # sdk -> starters -> 17 services (DAG order)
-make enroll        # enroll every platform service repo (composable, RS §6)
+make build         # sdk -> flutter bundles -> starters -> services (DAG order)
+make start         # cold boot: provision-on-boot converges the platform
+                   # registration (roles, identity rows, ACL/grant rows),
+                   # then boots the platform core
 ```
+
+`make enroll` stays as the manual convergence surface (composable, RS §6) -
+`make start` runs the same pass automatically on every cold boot
+(provision-on-boot, CLI DESIGN §4.2), so identity rows survive any reset
+without remembering to enroll each repo.
 
 A single-repo team never needs this folder's Makefile - clone e.g.
 `sentin8-auth` alone; `cargo build` fetches the SDK pin and builds. Vertical

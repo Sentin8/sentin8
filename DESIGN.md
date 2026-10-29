@@ -207,6 +207,12 @@ sequenceDiagram
   `postgres-ops` operator pair + pg_hba/pg_ident seed files) →
   `make infra-up` (PostgreSQL starts TLS-only) → `db bootstrap` /
   `vertical init` (roles + map rows) → `make start` (fleet).
+- **Provision-on-boot**: the cold-boot `make start` path converges the
+  platform's declarative enrollment (roles + `pgm` certificate-identity
+  rows + Valkey ACL users + M2M grant rows) idempotently BEFORE spawning
+  the fleet (CLI DESIGN §4.2) - the identity plane self-heals after any
+  `.run/secrets` reset inside the boot the operator already runs; a
+  manual `make enroll` remains the operator's convergence surface.
 - **Bootstrap tier**: `db bootstrap` and operator tooling connect as
   the DDL-only superuser via the `postgres-ops` infra pair (CN
   `m2m-postgres-ops`, an operator-held identity like `valkey-admin`)
@@ -244,6 +250,16 @@ sequenceDiagram
 - `vertical init` / `vertical enroll` / `dev-destroy.sh` use the same
   `postgres-ops` identity for the maintenance connection (the same role
   the bootstrap tier uses today - passwordless now).
+- **Platform census convergence**: the fixed plane's `pgm` rows
+  (operator + every platform service role) re-converge on EVERY
+  `db bootstrap` / `vertical enroll` pass (`platform_pg_ident_rows`
+  + the pass-collected rows) - the map self-heals after any
+  `.run/secrets` reset without a fleet-wide re-init. The fragment set is
+  DERIVED, never listed: `make enroll` and the boot pass both enumerate
+  the binary prefix's repos and enroll whichever carry
+  `service-registration.json` - a new platform repo joins both the
+  enroll surface and the boot provisioning by existing, no inventory to
+  forget (the SIGNENROLL-1/2 list-staleness class is structurally gone).
 - The compose healthcheck stays `pg_isready` (no auth performed).
 - `sentin8-cli infra` status line connects via the factory as the
   `postgres-ops` identity (read-only summary).

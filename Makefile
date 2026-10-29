@@ -83,7 +83,7 @@ BINARY_DIR = $(if $(RELEASE),release,debug)
 BINARY_PREFIX = $(subst $(space),:,$(foreach d,$(shell for d in sentin8-* ; do [ -d "$$d/target/$(BINARY_DIR)" ] && echo "$$d/target/$(BINARY_DIR)"; done),$(abspath $(d))))
 space := $(empty) $(empty)
 
-.PHONY: help build build-sdk build-starters build-services build-one clean start stop status \
+.PHONY: help build build-sdk build-starters build-services build-flutter build-one clean start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
 	conformance-up conformance-down conformance-purge conformance-seed \
        conformance-seed-all conformance-all
@@ -95,7 +95,24 @@ help: ## Show this help
 	@echo "Profile wrappers: build start stop status take a"
 	@echo "-release / -debug suffix, e.g. make start-release == RELEASE=--release make start."
 
-build: build-sdk build-starters build-services ## Build the group in DAG order (RELEASE=--release for release)
+build: build-sdk build-flutter build-starters build-services ## Build the group in DAG order (RELEASE=--release for release)
+
+# build-flutter - the UI bundles the fleet SERVES are build artifacts of
+# their app repos (`flutter build web`). The fleet does not rebuild them:
+# sentin8-auth serves `sentin8-auth-ui/build/web` (SENTIN8_AUTH_UI_DIR) and
+# sentin8:web serves each app's dash/web dir from Valkey `captain:app_dir:*`
+# keys - a `make clean` in an app repo deletes the bundle while the platform
+# keeps running, and every auth UI page then 404s (the post-reset
+# global-setup death class, 2026-10-29). Deterministic skip: a rebuild runs
+# ONLY when the bundle is missing (the pubspec did not change checks stay
+# the app repos' concern), keeping `make build` a stable no-op.
+build-flutter: ## Rebuild any served Flutter web bundle that is missing (auth-ui, dash)
+	@test -f sentin8-auth-ui/build/web/index.html || { \
+		echo "==> flutter build: sentin8-auth-ui (bundle missing)"; \
+		$(MAKE) --no-print-directory -C sentin8-auth-ui build || exit 1; }
+	@test -f sentin8-dash/build/web/index.html || { \
+		echo "==> flutter build: sentin8-dash (bundle missing)"; \
+		$(MAKE) --no-print-directory -C sentin8-dash build || exit 1; }
 
 build-sdk: ## Build the shared workspace (EVERYTHING depends on this)
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
@@ -233,8 +250,9 @@ enroll: ## Enroll every platform service repo (composable registration, RS §6)
 		../sentin8-captain \
 		../sentin8-auth ../sentin8-acme ../sentin8-proxy ../sentin8-bus \
 		../sentin8-db ../sentin8-storage ../sentin8-post ../sentin8-stat \
-		../sentin8-secrets ../sentin8-func ../sentin8-cron ../sentin8-flow \
+		../sentin8-secrets ../sentin8-sign ../sentin8-func ../sentin8-cron ../sentin8-flow \
 		../sentin8-ai ../sentin8-sys ../sentin8-app ../sentin8-bff ../sentin8-web \
+		../sentin8-cli \
 		../sentin8-dash
 
 test: ## Run the SDK + starters test suites
