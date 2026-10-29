@@ -83,7 +83,7 @@ BINARY_DIR = $(if $(RELEASE),release,debug)
 BINARY_PREFIX = $(subst $(space),:,$(foreach d,$(shell for d in sentin8-* ; do [ -d "$$d/target/$(BINARY_DIR)" ] && echo "$$d/target/$(BINARY_DIR)"; done),$(abspath $(d))))
 space := $(empty) $(empty)
 
-.PHONY: help build build-sdk build-starters build-services build-one start stop status \
+.PHONY: help build build-sdk build-starters build-services build-one clean start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
 	conformance-up conformance-down conformance-purge conformance-seed \
        conformance-seed-all conformance-all
@@ -123,6 +123,19 @@ build-services: build-starters ## Build the 17 platform service repos
 build-one:
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
 	cd sentin8-$(SERVICE) && $(call stamp_env,sentin8-$(SERVICE)) $(CARGO) build $(RELEASE)
+
+# clean — every child repo's own clean (cargo/flutter target/ + their
+# local .run .run/logs .tmp), including start-adjacent repos (cli,
+# captain, flutter apps, e2e, packaging) and the non-repo dirs that
+# only carry artifacts. Tree-level .run/.tmp (RUNDIR above) are the
+# WHOLE TREE's fleet state — the ROOT `make clean` owns their teardown;
+# this group's clean leaves them alone.
+clean: ## Clean every child repo (target/, build artifacts, local .run/.tmp)
+	@for d in $$(ls -d sentin8-*/ 2>/dev/null); do \
+		[ -f "$$d/Makefile" ] || continue; \
+		echo "==> clean: $$d"; \
+		$(MAKE) --no-print-directory -C "$$d" clean || exit 1; \
+	done
 
 # ── Fleet run ─────────────────────────────────────────────────────────────
 # Profile-agnostic: the default profile runs target/debug binaries,
