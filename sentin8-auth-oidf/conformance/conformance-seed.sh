@@ -631,7 +631,12 @@ VCI_PRIV1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(jso
 VCI_PRIV2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p2']))")
 VCI_SCOPE='openid profile email offline_access credential:VerifiedPersonCredential credential:VerifiedEmployeeCredential eudi.pid.1 eudi.pid.1.nobinding eudi.pid.1.attestation eudi.pid.1.jwt.keyattest eudi.pid.1.attestation.keyattest eudi.pid.1.jwt_and_attestation.keyattest openid.example.cert.1'
 VCI_JSON="$(dcr "cert-vci" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB1,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true")"
-VCI2_JSON="$(dcr "cert-vci-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB2,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true")"
+# client2 registers BOTH forms: the AddRedirectUriQuerySuffix cell presents
+# <callback>?dummy1=lorem&dummy2=ipsum and the suite asserts the suffixed uri
+# IS registered ("the redirect url, including this suffix, must be registered
+# for the client") - the OC-22 exact-match rule rejects any query-bearing
+# variant that is not itself registered.
+VCI2_JSON="$(dcr "cert-vci-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB2,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
 emit_client vci "$VCI_JSON"
 emit_client vci2 "$VCI2_JSON"
 echo "private_jwks(vci)=$VCI_PRIV1" >> "$SEED_OUT"

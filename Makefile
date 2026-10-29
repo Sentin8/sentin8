@@ -133,12 +133,18 @@ build-one:
 # SENTIN8_CAPTAIN_CATALOG_PATHS from the root .env.
 
 # STARTSCOPE-1 (RS §4.5.2): this group's boot scope — the platform CORE
-# only (the 18 sentin8:* service types; captain boot-skips its own entry;
-# vertical services are NEVER booted from the platform group's start —
-# their databases and enrollment belong to their own groups'
+# only (the 19 sentin8:* service types below; captain boot-skips its own
+# entry; vertical services are NEVER booted from the platform group's
+# start — their databases and enrollment belong to their own groups'
 # `make start`). The catalog stays the FULL union (the scope pin filters
 # only the boot spawn), so a vertical joins the running fleet any time
 # via its group Makefile or `captain start <vertical type>`.
+#
+# The pin is passed as ONE comma-joined argument in BOTH branches
+# (STARTSCOPE-3, CLI DESIGN §4.1): the CLI splits/canonicalizes it into
+# the start-services list (captain up) or the sentin8-boot allow-list
+# (captain down). The CLI owns the cold-boot `SENTIN8_SERVICES` export —
+# the Makefile never sets it.
 PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:stat,sentin8:secrets,sentin8:sign,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
 
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
@@ -153,8 +159,7 @@ start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release 
 		$(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start $(PLATFORM_SERVICES); \
 	else \
 		echo "→ captain down — booting the platform core (STARTSCOPE-1 scope pin)"; \
-		export SENTIN8_SERVICES="$(PLATFORM_SERVICES)"; \
-		$(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start; \
+		$(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start $(PLATFORM_SERVICES); \
 	fi
 
 stop: ## Stop the whole fleet (graceful; never pkill)
