@@ -244,16 +244,21 @@ fleet-up: ## Multi-machine dev: infra + base fleet (docker backend ready)
 	export SENTIN8_SERVICES="$${SENTIN8_SERVICES:-sentin8:acme,sentin8:auth,sentin8:proxy,sentin8:bus,sentin8:sys,sentin8:bff,sentin8:web}"; \
 	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start
 
-enroll: ## Enroll every platform service repo (composable registration, RS §6)
+# enroll (RS §6): every platform repo carrying a service-registration.json
+# fragment, DERIVED not listed (the SIGNENROLL-1/2 lesson: the enroll list
+# kept going stale on every new repo - derivation cannot). The same
+# derivation provision-on-boot performs on cold start, so `make enroll`
+# and the boot converge IDENTICAL fragment sets. The pass is idempotent;
+# it also bootstraps the platform database first when the scout is absent
+# (bootstrap-if-needed gate, CLI DESIGN §4.9a) - the operator flow after a
+# dev reset is simply: reset -> make enroll -> make start.
+ENROLL_PATHS := $(shell for d in sentin8-*/; do [ -f "$$d/service-registration.json" ] && echo "../$$d"; done)
+
+enroll: ## Enroll every platform service fragment (derived; bootstraps first when the DB is virgin - CLI DESIGN §4.9a)
+	@test -n "$(ENROLL_PATHS)" || { echo 'No service-registration.json fragments found.'; exit 1; }
 	@export SENTIN8_CAPTAIN_BINARY_PREFIX="$(BINARY_PREFIX)"; \
 	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- vertical enroll \
-		../sentin8-captain \
-		../sentin8-auth ../sentin8-acme ../sentin8-proxy ../sentin8-bus \
-		../sentin8-db ../sentin8-storage ../sentin8-post ../sentin8-stat \
-		../sentin8-secrets ../sentin8-sign ../sentin8-func ../sentin8-cron ../sentin8-flow \
-		../sentin8-ai ../sentin8-sys ../sentin8-app ../sentin8-bff ../sentin8-web \
-		../sentin8-cli \
-		../sentin8-dash
+		$(ENROLL_PATHS)
 
 test: ## Run the SDK + starters test suites
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
