@@ -22,3 +22,6 @@
 /scripts/conformance/root-ca.crt
 /scripts/conformance/suite-localhost-emobix.crt
 /scripts/conformance/suite-localhost-emobix.key
+
+# Local org-repo clone (never commit)
+/.github/
