@@ -18,6 +18,7 @@ RUN apt-get update \
         procps \
         tini \
     && rm -rf /var/lib/apt/lists/*
+# setpriv (the privilege drop in the entrypoint) ships in the base image.
 
 # The appliance's writable state (captain.sock, logs) lives on a named
 # volume; the entrypoint owns this directory.
@@ -43,7 +44,15 @@ RUN for repo in sentin8-acme sentin8-auth sentin8-bff sentin8-bus \
 COPY entrypoint.sh /usr/local/bin/sentin8-core-entrypoint
 RUN chmod +x /usr/local/bin/sentin8-core-entrypoint
 
-USER 1000:1000
 WORKDIR /var/lib/sentin8
+
+# NOTE: no USER directive - the container starts as ROOT and the
+# entrypoint installs the platform CA into the OS trust store (a
+# root-only write) before dropping to uid 1000 via setpriv for the
+# captain exec (the 68x "OS trust-store install failed: Permission
+# denied" loop: without the install, every native-roots reqwest client
+# in the fleet - captain's health probes first - fails server-cert
+# verification and the fleet flaps on health-probe kills).
+# WORKDIR /var/lib/sentin8 stays uid-1000-owned (chown -R above).
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/sentin8-core-entrypoint"]

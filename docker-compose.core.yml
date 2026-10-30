@@ -130,18 +130,26 @@ services:
       # binaries are BIND-MOUNTED, never baked - a host rebuild is the
       # upgrade path (upgrade-instance, no image rebuild).
     container_name: sentin8core-machine
+    # Runs as ROOT: the entrypoint installs the platform CA into the OS
+    # trust store (a root-only write) BEFORE dropping to uid 1000 via
+    # setpriv for the captain exec. Every native-roots reqwest client
+    # inside (captain's health probes, outbound m2m HTTPS) verifies server
+    # leaves against the OS trust store - without the CA install the
+    # store lacks the platform CA and EVERY probe fails cert verification
+    # ("health probes failed" mass-kills - the trust-store EPERM loop).
+    # postgres/valkey keep their user: lines (no root work).
     depends_on:
       postgres:
         condition: service_healthy
       valkey:
         condition: service_healthy
-    user: "1000:1000"
     # The loopback truth model: inside this netns 127.0.0.1 is the core
     # fleet's own namespace; the appliance captain registers on 127.0.0.1
     # and the in-container proxy dials 127.0.0.1:800x. The EDGE pin points
     # here explicitly (a two-machine fleet never self-elects - DESIGN
     # §11.3), so the proxy spawns in this container.
     environment:
+      TREE_ROOT: ${TREE_ROOT:-}
       SENTIN8_CORE_APPLIANCE: "1"
       SENTIN8_CAPTAIN_LOCAL_IP: "127.0.0.1"
       SENTIN8_CAPTAIN_EDGE_IP: "127.0.0.1"
@@ -199,6 +207,10 @@ services:
       # ~/.sentin8/acme by default; the entrypoint rewrites
       # SENTIN8_ACME_DATA_DIR to this mount).
       - ${TREE_ROOT_ACME}/acme:/mnt/host-acme
+      # The dash SPA bundle (the sentinel app's web build - the
+      # dash UI is SERVED by sentin8:web from the captain:app_dir keys;
+      # the appliance path form lives in the container tree).
+      - ${TREE_ROOT}/sentin8/sentin8-dash/build/web:/opt/sentin8/sentin8-dash/build/web:ro
       # Per-appliance run state (captain.sock, captain.log, service logs)
       # on a named volume - a disposable dev plane.
       - sentin8core-run:/var/lib/sentin8/run
