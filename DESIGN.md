@@ -288,6 +288,91 @@ re-handshake on reconnect; `pg_hba.conf`/`pg_ident.conf` changes arm on
 the next SIGHUP (every CLI write reloads), so rotation never needs a
 server restart.
 
+### 3.3 The core appliance profile (COREAP - dev/test split-plane)
+
+The dev split-plane: the platform core (the 17 services) runs in ONE
+docker container on the dev host, verticals run as host processes.
+Composed as a second compose project (`docker-compose.core.yml`, project
+`sentin8core`) NEXT TO the base infra, sharing the same TLS material tree
+and secrets contract. The base `docker-compose.yml` remains the single-
+machine localhost profile - the appliance is opt-in and never starts
+implicitly.
+
+- **Services in one container, one netns**: postgres + valkey + a `core`
+  machine container (captain + the 17 platform binaries, bind-mounted
+  from the group's `sentin8-*/target/{profile}` trees - no image build;
+  the same debug binaries the operator builds). The machine identity is
+  `SENTIN8_CAPTAIN_LOCAL_IP=127.0.0.1`: inside the container loopback is
+  its own netns, and the four published entry ports make the plane
+  reachable from the host - `443` (proxy ingress), `5432` (postgres),
+  `6379` (valkey), `18000` (captain API). The service port range is
+  NEVER published: that is what keeps host ports free so a handed-off
+  core service can bind them on the host.
+- **Published-port loopback binding**: every `ports:` entry is pinned to
+  `127.0.0.1` - the appliance is a dev loopback plane, never a LAN
+  exposure; the TLS posture is unchanged (cert SANs already cover
+  `localhost/127.0.0.1/::1`).
+- **Two captains, one registry** (captain DESIGN §11.11): the host
+  captain (host LAN IP) supervises verticals + handed-off core services;
+  the appliance captain (`127.0.0.1`) supervises the core fleet. Distinct
+  machine identities in the shared Valkey keep the fleet invariants
+  (leader lock, singletons, TTLs) honest. The in-container proxy
+  round-robins registry rows, so a service stopped in the appliance and
+  placed on the host (or back) is picked up by the next request - the
+  hand-off dev loop for debugging a core service on the host.
+- **Env contract**: the container sources the operator `.env` (bind-
+  mounted read-only) with appliance overrides in its entrypoint:
+  `SENTIN8_RUN_DIR`/`SENTIN8_LOG_DIR` (per-appliance `.run` volume),
+  `SENTIN8_CAPTAIN_SOCK` (host-bind-mounted socket dir), and - because
+  the operator env names HOST paths/hosts - `SENTIN8_SECRETS_DIR`,
+  `SENTIN8_M2M_CREDENTIALS_DIR`, `SENTIN8_TLS_CA_PEM` (the mounted
+  public chain), `SENTIN8_ACME_DATA_DIR` (the mounted platform CA dir
+  - the appliance's acme IS the platform CA; the keys persist on the
+  host, so an appliance rebuild never rotates the identity), and the
+  infra coordinates `SENTIN8_VALKEY_HOST`/`SENTIN8_PG_HOST` +
+  `VALKEY_URL`/`DATABASE_URL` rewrites pointing at the compose service
+  names (`sentin8core-valkey`, `sentin8core-postgres`). Per-service
+  DSNs (`SENTIN8_{SVC}_DATABASE_URL`, `..._POLICY_DATABASE_URL`) are
+  exported when unset - several services fall back to the SDK's
+  hardcoded `sentin8_app@localhost` DSN, which is the HOST view.
+- **Bridge netns + service-name dialing (the verified model)**: postgres
+  and valkey run as sibling containers on the appliance's bridge
+  network, each publishing its port on host loopback; the machine
+  container dials them BY COMPOSE SERVICE NAME. The TLS server leaves
+  carry those names as SANs - `make infra-tls` gains
+  `INFRA_SANS=sentin8core-postgres,sentin8core-valkey` and the mint is
+  SAN-coverage-aware (a leaf missing a requested name re-mints; acme
+  `--ensure-infra-tls --infra-sans=...`). A shared-netns variant
+  (`network_mode: service:core`) was tried and REJECTED in live E2E:
+  every machine-container restart strands the infra listeners in the
+  old netns (join happens at infra start), and a restartable supervisor
+  container makes that fatal.
+- **Host-side control (the bind-mounted socket)**: the appliance's
+  captain UDS socket lives on a host-bind-mounted dir
+  (`.run/core-sock/captain.sock` - the docker.sock pattern), so the HOST
+  CLI drives the appliance captain with kernel-proven peer credentials
+  - no device-flow bearer for lifecycle ops. The CLI's per-key routing
+  (CLI DESIGN §4.3) prefers this socket for appliance keys
+  (`SENTIN8_CORE_APPLIANCE_IP` + `SENTIN8_CORE_CAPTAIN_SOCK`), falling
+  back to the bearer-gated published API (`:18000`).
+- **Boot convergence (the verified contract)**: the container boot is a
+  connection storm (17 services × main+policy pools, TLS+cert-auth
+  handshakes through the bridge) against the SDK's 8s pool
+  acquire-timeout - some wave-2/3 services exceed it, crash 3 times,
+  and park. Captain's last-resort respawner (every 300s) converges the
+  fleet to fully Active on its own - `core-up` prints status and the
+  operator watches the final waves; no manual action needed. The
+  honest long-term fix is an SDK knob for the acquire timeout; the
+  appliance E2E proved the convergence path.
+- **Guards**: the platform group's `make start` refuses while the
+  appliance container is up (the double-boot guard - two auth instances
+  round-robining is a valid scale-out but never a dev intent);
+  `core-down` stops the container fleet gracefully first
+  (`SENTIN8_SENTIN8_CAPTAIN_URL` pointed at the appliance, captain stop),
+  then `compose down -v` (the volume is disposable dev state; the
+  bootstrap converge rides `make enroll` on the next `core-up`, the
+  bootstrap-if-needed gate owns it).
+
 ## 4. Data Model
 
 The platform owns database `sentin8`, schema-per-service (`auth`, `bus`,

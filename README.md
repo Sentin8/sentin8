@@ -58,6 +58,37 @@ groups are built from their own group folders; vertical services ride the
 captain via `SENTIN8_CAPTAIN_CATALOG_PATHS` (root .env) - this group never
 builds or references a vertical (AGENTS rule 1).
 
+## The core appliance (dev split-plane)
+
+Vertical development against a stable, dockerized core (group DESIGN §3.3,
+captain DESIGN §11.11):
+
+```bash
+make core-up       # core fleet (17 services) + PG + Valkey in ONE container,
+                   # published on 127.0.0.1 only (443/5432/6379/18000)
+                   # then: make enroll  (bootstraps + enrolls the virgin DB)
+# verticals run on the HOST exactly as today (same DSNs, same DNS)
+```
+
+- Verticals keep their identical workflow: `*.local.sentin8.dev` still
+  resolves to 127.0.0.1; PG/Valkey DSNs stay `localhost`.
+- Hand a core service to the host for debugging (gdb, hot rebuilds):
+  stop it on the appliance, start it on the host, traffic follows the
+  registry (both directions verified live):
+  ```bash
+  export SENTIN8_CORE_APPLIANCE_IP=127.0.0.1   # enable per-key routing
+  sentin8-cli captain stop-instance 127.0.0.1:8005   # auth leaves docker
+  sentin8-cli captain start sentin8:auth             # spawns on the HOST
+  sentin8-cli captain upgrade-instance 172.22.216.164:8003   # host rebuild loop
+  # reverse: stop-instance <host-key> + start sentin8:auth -> back in docker
+  ```
+- The appliance captain's control socket is bind-mounted out
+  (`.run/core-sock/captain.sock`) - the host CLI drives it with
+  kernel-proven peer credentials, no device-flow sign-in for lifecycle ops.
+- `make start` refuses while the appliance is up (double-boot guard).
+  First boot converges in waves - captain's last-resort respawner parks
+  and retries storm-timed-out services until the fleet is fully Active.
+
 > Group docs: `README.md` (this file) - overview; `DESIGN.md` - the group's
 > detailed design; `BUSINESS.md` - business requirements. Service-level
 > docs live in each service repo. Design of record for the split:

@@ -85,6 +85,7 @@ space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-flutter build-one clean start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
+	core-up core-down core-logs core-status \
 	conformance-up conformance-down conformance-purge conformance-seed \
        conformance-seed-all conformance-all
 
@@ -179,6 +180,15 @@ PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,senti
 
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
+	@if docker inspect sentin8core-machine >/dev/null 2>&1 && \
+	   [ "$$(docker inspect -f '{{.State.Running}}' sentin8core-machine 2>/dev/null)" = "true" ]; then \
+		echo 'ERROR: the core appliance is running (make core-up).' >&2; \
+		echo 'The platform core is already supervised in docker; a second host boot' >&2; \
+		echo 'would spawn non-singleton twins (auth/sys/bus/...) that round-robin.' >&2; \
+		echo 'Either make core-down first, or hand off individual services:' >&2; \
+		echo '  sentin8-cli captain place <host-ip> <service-types>' >&2; \
+		exit 1; \
+	fi
 	@export SENTIN8_CAPTAIN_BINARY_PREFIX="$(BINARY_PREFIX)"; \
 	export SENTIN8_PG_POOL_MAX=$${SENTIN8_PG_POOL_MAX:-8}; \
 	set -a; . ../.env; set +a; \
@@ -211,10 +221,16 @@ $(PROFILED:%=%-release):
 $(PROFILED:%=%-debug):
 	@$(MAKE) --no-print-directory RELEASE= $(patsubst %-debug,%,$@)
 
+# Infra TLS material. INFRA_SANS (optional, comma-separated) adds extra
+# server-leaf SANs for the core appliance's compose service names (group
+# DESIGN §3.3): the appliance dials postgres/valkey BY SERVICE NAME inside
+# its bridge netns, so verify-full needs those names in the leaves.
+INFRA_SANS ?=
 infra-tls: ## Materialize the infra TLS material (Valkey + PostgreSQL server leaves, control/admin/ops pairs, pg_hba/pg_ident seeds, workload pre-mint)
 	@set -a; . ../.env; set +a; \
 	./sentin8-acme/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-acme \
 		--ensure-infra-tls \
+		$(if $(INFRA_SANS),--infra-sans=$(INFRA_SANS)) \
 		--mint-workloads=sentin8:acme,sentin8:ai,sentin8:app,sentin8:auth,sentin8:bff,sentin8:bus,sentin8:cron,sentin8:db,sentin8:flow,sentin8:func,sentin8:post,sentin8:proxy,sentin8:secrets,sentin8:stat,sentin8:storage,sentin8:sys,sentin8:web
 
 infra-up: ## Start dev PostgreSQL 18 + Valkey (THE tree-wide infra, §2.2.1)
@@ -223,6 +239,71 @@ infra-up: ## Start dev PostgreSQL 18 + Valkey (THE tree-wide infra, §2.2.1)
 
 infra-down: ## Stop the dev infra
 	@docker compose down
+
+# ── The core appliance (group DESIGN.md §3.3, captain DESIGN §11.11) ────────
+# The dev split-plane: the platform CORE (postgres + valkey + one machine
+# container running captain + the 17 services) in a SECOND compose project,
+# verticals on the host. Opt-in - `make start` refuses while the appliance
+# is up (the double-boot guard). The appliance identity is 127.0.0.1; the
+# host CLI reaches its captain on 127.0.0.1:18000 (per-key routing).
+CORE_COMPOSE := -f docker-compose.core.yml -p sentin8core
+# Absolute tree root for the compose binds (the PATH FORM note in
+# docker-compose.core.yml): compose-relative binds ride the WSL gRPC-FUSE
+# proxy and materialize as empty dirs; absolute paths are reliable.
+# TREE_ROOT_ACME is the HOST home of the platform Acme data dir
+# (SENTIN8_ACME_DATA_DIR's parent) - the appliance mounts it so its acme
+# instance serves the SAME platform CA (keys persist on the host).
+# Derived from the operator .env's SENTIN8_ACME_DATA_DIR (parent dir);
+# overridable on the command line.
+SENTIN8_ACME_HOME ?= $(patsubst %/,%,$(dir $(shell grep -h '^SENTIN8_ACME_DATA_DIR=' ../.env 2>/dev/null | cut -d= -f2 | tr -d '\r')))
+CORE_ENV := TREE_ROOT=$(abspath ..) TREE_ROOT_ACME=$(SENTIN8_ACME_HOME)
+
+core-up: ## Bring the core appliance up (builds missing binaries first; waits for health)
+	@test -f ../.env || { echo 'No ../.env - copy ../.env.example first.'; exit 1; }
+	@test -n "$(SENTIN8_ACME_HOME)" || { echo 'Set SENTIN8_ACME_HOME (the parent of SENTIN8_ACME_DATA_DIR, e.g. $$HOME/.sentin8) - the appliance mounts the platform CA dir.'; exit 1; }
+	@echo "==> core appliance: ensuring binaries (build skipped when fresh)"
+	$(MAKE) build-sdk build-starters build-services
+	@$(MAKE) --no-print-directory infra-tls INFRA_SANS=sentin8core-postgres,sentin8core-valkey
+	@echo "==> core appliance: composing postgres + valkey + the machine container"
+	docker compose $(CORE_ENV) $(CORE_COMPOSE) up -d --build
+	@echo "==> core appliance: fixing fresh volume ownership (host uid - the initdb EPERM class)"
+	@for vol in sentin8core_sentin8core-pgdata sentin8core_sentin8core-valkeydata sentin8core_sentin8core-run; do \
+		docker run --rm -v "$$vol:/d" alpine chown 1000:1000 /d 2>/dev/null \
+			|| echo "WARN: could not fix ownership of $$vol"; \
+	done
+	@docker restart sentin8core-postgres sentin8core-valkey sentin8core-machine >/dev/null 2>&1 || true
+	@echo "==> core appliance: waiting for the machine container health"
+	@deadline=$$(( $$(date +%s) + 300 )); \
+	until [ "$$(docker inspect -f '{{.State.Health.Status}}' sentin8core-machine 2>/dev/null)" = "healthy" ]; do \
+		if [ $$(date +%s) -gt $$deadline ]; then \
+			echo "ERROR: the core appliance did not become healthy in 300s." >&2; \
+			echo "Logs: docker logs sentin8core-machine; make core-logs" >&2; exit 1; \
+		fi; \
+		sleep 5; \
+	done
+	@echo "==> core appliance healthy. The platform core is in docker; verticals run on the host."
+	@echo "    host CLI: export SENTIN8_CORE_APPLIANCE_IP=127.0.0.1 (per-key routing)"
+	@echo "    bootstrap on first boot: make enroll (the DB is virgin after core-down -v)"
+
+core-down: ## Graceful appliance stop (captain drains) + volume wipe (fresh initdb next up)
+	@echo "==> core appliance: stopping the in-container fleet (graceful)"
+	@if docker inspect sentin8core-machine >/dev/null 2>&1; then \
+		SENTIN8_SENTIN8_CAPTAIN_URL=http://127.0.0.1:18000 \
+		./sentin8-cli/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-cli captain stop \
+		  || echo "WARN: graceful stop failed (container down?) - proceeding to compose down."; \
+	fi
+	@echo "==> core appliance: compose down -v (volumes removed - fresh initdb next up)"
+	docker compose $(CORE_ENV) $(CORE_COMPOSE) down -v
+
+core-logs: ## Follow the appliance captain + service logs
+	@docker exec sentin8core-machine tail -n 200 -f /var/lib/sentin8/run/logs/captain.log 2>/dev/null \
+	  || { echo "appliance not running - make core-up first" >&2; exit 1; }
+
+core-status: ## Fleet rows across BOTH captains (appliance + host, when both are up)
+	@SENTIN8_SENTIN8_CAPTAIN_URL=http://127.0.0.1:18000 \
+		./sentin8-cli/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-cli captain services 2>/dev/null \
+	  || echo "(appliance captain not reachable - is the appliance up? make core-up)"
+	@$(MAKE) --no-print-directory status
 
 # fleet-up (captain DESIGN §11.7): the multi-machine dev entry.
 # Boots the base fleet trimmed to the placement-minimal set (acme/auth/

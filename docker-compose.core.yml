@@ -1,0 +1,224 @@
+# SPDX-FileCopyrightText: Copyright Logically Magic Inc. <hello@logicallymagic.com>
+# SPDX-FileCopyrightText: Copyright Hamid Jahanzad <Hamid@Jahanzad.com>
+# SPDX-FileCopyrightText: Copyright Contributors to the Sentin8
+# SPDX-License-Identifier: Apache-2.0
+
+# The core appliance (group DESIGN.md §3.3 - COREAP, captain DESIGN §11.11).
+#
+# The dev split-plane: the platform CORE (postgres + valkey + one "machine"
+# container running captain and the 17 platform services) runs HERE, while
+# verticals run as host processes. A second compose project (name:
+# sentin8core) next to the base infra - never started implicitly; the
+# single-machine profile (`docker-compose.yml` + `make start`) stays the
+# default.
+#
+#   make core-up     # bring the appliance up (waits for health)
+#   make core-down  # graceful stop + volume wipe
+#   make core-logs  # follow the appliance captain log
+#
+# One namespace rule makes the whole shape cohere (captain DESIGN §11.11):
+# the machine container runs with SENTIN8_CAPTAIN_LOCAL_IP=127.0.0.1, so
+# its captain registers the core fleet on loopback keys (127.0.0.1:800x)
+# and its proxy dials them on loopback. Exactly FOUR entry ports are
+# published, ALL pinned to host loopback:
+#   443   - the proxy ingress (https://*.local.sentin8.dev -> 127.0.0.1)
+#   5432  - postgres (the operator DSNs stay localhost:5432)
+#   6379  - valkey   (VALKEY_URL stays localhost:6379)
+#   18000 - the appliance captain API (per-key routing target,
+#           SENTIN8_CORE_CAPTAIN_URL)
+# The service port range is NEVER published - host ports stay free, which
+# is what lets a handed-off core service bind them on the host.
+#
+# Bind-mount model (no image build - group DESIGN.md §3.3): the container
+# runs the SAME debug binaries the operator builds. The group's
+# sentin8-*/target/{profile} trees, .run/secrets, the operator .env, the
+# auth-ui web bundle, and the vertical catalogs are mounted; the binary
+# prefix inside points at the mounted paths, so a host rebuild +
+# upgrade-instance works against appliance keys verbatim.
+#
+# PATH FORM: every bind is interpolated through TREE_ROOT (below) - an
+# ABSOLUTE host path. Compose-relative binds (../foo) ride Docker
+# Desktop's gRPC-FUSE proxy on WSL and were observed to materialize as
+# EMPTY placeholder directories (the binary vanished inside the
+# container while a plain `docker run -v` with the same absolute path
+# worked); absolute paths take the direct mount path and are reliable.
+# Compose interpolates ${TREE_ROOT} from the Makefile core-* targets,
+# which pass TREE_ROOT=$(abspath ..).
+
+name: sentin8core
+
+services:
+  # ── PostgreSQL (certificate identity - same contract as the base infra) ──
+  # BRIDGE model (§3.3): its own netns, published on host loopback. The
+  # appliance's services dial it by compose service name INSIDE the bridge
+  # netns (`sentin8core-postgres:5432`) - the server leaf carries that
+  # name via `make infra-tls INFRA_SANS=...` (verify-full needs the SAN).
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: sentin8core-postgres
+    command: >
+      postgres
+      -c max_connections=600
+      -c superuser_reserved_connections=5
+      -c ssl=on
+      -c ssl_cert_file=/tls/postgres-server.crt
+      -c ssl_key_file=/tls/postgres-server.key
+      -c ssl_ca_file=/tls-ca/root-ca.crt
+      -c hba_file=/pg-config/pg_hba.conf
+      -c ident_file=/pg-config/pg_ident.conf
+    user: "1000:1000"
+    environment:
+      POSTGRES_USER: sentin8
+      POSTGRES_PASSWORD: sentin8
+      POSTGRES_DB: sentin8
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_INITDB_ARGS: "--auth-host=cert"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - sentin8core-pgdata:/var/lib/postgresql/data/pgdata
+      - ${TREE_ROOT}/.run/secrets/infra-tls:/tls:ro
+      - ${TREE_ROOT}/.run/secrets/acme-ca:/tls-ca:ro
+      - ${TREE_ROOT}/.run/secrets/infra-tls:/pg-config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentin8 -d sentin8"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Valkey (certificate identity - same contract as the base infra) ──────
+  # BRIDGE model (§3.3): its own netns, published on host loopback; the
+  # appliance dials it by compose service name (SAN via INFRA_SANS).
+  valkey:
+    image: valkey/valkey:9-alpine
+    container_name: sentin8core-valkey
+    user: "1000:1000"
+    command: >
+      valkey-server
+      --port 0
+      --tls-port 6379
+      --tls-cert-file /tls/valkey-server.crt
+      --tls-key-file /tls/valkey-server.key
+      --tls-ca-cert-file /tls-ca/root-ca.crt
+      --tls-auth-clients yes
+      --tls-auth-clients-user CN
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - sentin8core-valkeydata:/data
+      - ${TREE_ROOT}/.run/secrets/infra-tls:/tls:ro
+      - ${TREE_ROOT}/.run/secrets/acme-ca:/tls-ca:ro
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli --tls --cert /tls/valkey-control.crt --key /tls/valkey-control.key --cacert /tls-ca/root-ca.crt ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── The core machine (captain + the 17 platform services) ────────────────
+  core:
+    image: sentin8-core:dev
+    build:
+      context: ./core-appliance
+      # Thin runtime image only (group DESIGN.md §3.3): the platform
+      # binaries are BIND-MOUNTED, never baked - a host rebuild is the
+      # upgrade path (upgrade-instance, no image rebuild).
+    container_name: sentin8core-machine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    user: "1000:1000"
+    # The loopback truth model: inside this netns 127.0.0.1 is the core
+    # fleet's own namespace; the appliance captain registers on 127.0.0.1
+    # and the in-container proxy dials 127.0.0.1:800x. The EDGE pin points
+    # here explicitly (a two-machine fleet never self-elects - DESIGN
+    # §11.3), so the proxy spawns in this container.
+    environment:
+      SENTIN8_CORE_APPLIANCE: "1"
+      SENTIN8_CAPTAIN_LOCAL_IP: "127.0.0.1"
+      SENTIN8_CAPTAIN_EDGE_IP: "127.0.0.1"
+      # Per-key routing target for the HOST CLI (the published API port).
+      SENTIN8_CORE_CAPTAIN_URL: "http://127.0.0.1:18000"
+      # The captain API port INSIDE the container stays the platform
+      # default (8000); 18000 is only the published host side.
+    ports:
+      # The appliance's entry points - all pinned to host loopback (a dev
+      # loopback plane, never a LAN exposure). postgres/valkey publish
+      # their own (above) - each keeps its own netns on the bridge.
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:18000:8000"
+    volumes:
+      # The group's built binaries (read-only - the runtime never writes
+      # them; a host rebuild swaps content in place, the mount path is
+      # stable). ABSOLUTE paths (TREE_ROOT) - see the PATH FORM note above.
+      - ${TREE_ROOT}/sentin8/sentin8-acme/target:/opt/sentin8/sentin8-acme/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-auth/target:/opt/sentin8/sentin8-auth/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-bff/target:/opt/sentin8/sentin8-bff/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-bus/target:/opt/sentin8/sentin8-bus/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-captain/target:/opt/sentin8/sentin8-captain/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-cron/target:/opt/sentin8/sentin8-cron/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-db/target:/opt/sentin8/sentin8-db/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-flow/target:/opt/sentin8/sentin8-flow/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-func/target:/opt/sentin8/sentin8-func/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-post/target:/opt/sentin8/sentin8-post/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-proxy/target:/opt/sentin8/sentin8-proxy/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-secrets/target:/opt/sentin8/sentin8-secrets/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-sign/target:/opt/sentin8/sentin8-sign/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-stat/target:/opt/sentin8/sentin8-stat/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-storage/target:/opt/sentin8/sentin8-storage/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-sys/target:/opt/sentin8/sentin8-sys/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-web/target:/opt/sentin8/sentin8-web/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-cli/target:/opt/sentin8/sentin8-cli/target:ro
+      # The infra TLS material + CA chain. WRITABLE (no :ro): the m2m
+      # mint loop converges workload pairs INSIDE the appliance
+      # (SENTIN8_M2M_CREDENTIALS_DIR points at m2m-credentials/ under
+      # this tree - the same write access the host plane has; a read-only
+      # mount made every captain boot retry "client cert not readable"
+      # forever). The pg_ident/appends propagate to the host side through
+      # the same directory mount (compose §3.2).
+      - ${TREE_ROOT}/.run/secrets:/mnt/host-secrets
+      # The operator env - sourced by the entrypoint, never written.
+      - ${TREE_ROOT}/.env:/etc/sentin8/sentin8.env:ro
+      # The auth-ui web bundle the auth service serves.
+      - ${TREE_ROOT}/sentin8/sentin8-auth-ui/build/web:/opt/sentin8/auth-ui-web:ro
+      # The platform Acme data dir (the ROOT/INTERMEDIATE CA keys, accounts,
+      # issued-leaf store). WRITABLE: the appliance's acme instance IS the
+      # platform CA - it must serve the SAME chain the host minted (every
+      # existing workload pair + infra leaf trusts it) and keep issuing
+      # from it. The keys persist on the host, so a core-down rebuild of
+      # the appliance never rotates the platform identity.
+      # TREE_ROOT_ACME interpolates from the Makefile (the host's
+      # ~/.sentin8/acme by default; the entrypoint rewrites
+      # SENTIN8_ACME_DATA_DIR to this mount).
+      - ${TREE_ROOT_ACME}/acme:/mnt/host-acme
+      # Per-appliance run state (captain.sock, captain.log, service logs)
+      # on a named volume - a disposable dev plane.
+      - sentin8core-run:/var/lib/sentin8/run
+      # The appliance's UDS control socket, bind-mounted OUT to the host
+      # (the docker.sock pattern): the entrypoint points
+      # SENTIN8_CAPTAIN_SOCK at /mnt/host-sock/captain.sock, so the HOST
+      # CLI reaches the appliance captain over the socket with
+      # kernel-proven peer credentials (the §6.1.2 local-operator model)
+      # - no device-flow bearer needed for lifecycle ops. The mount is
+      # writable: captain creates/unlinks the socket file.
+      - ${TREE_ROOT}/.run/core-sock:/mnt/host-sock
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 3 http://127.0.0.1:8000/v1/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  sentin8core-pgdata:
+  sentin8core-valkeydata:
+  sentin8core-run:
