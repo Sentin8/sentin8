@@ -328,21 +328,28 @@ implicitly.
   round-robins registry rows, so a service stopped in the appliance and
   placed on the host (or back) is picked up by the next request - the
   hand-off dev loop for debugging a core service on the host.
-- **Env contract**: the container sources the operator `.env` (bind-
-  mounted read-only) with appliance overrides in its entrypoint:
-  `SENTIN8_RUN_DIR`/`SENTIN8_LOG_DIR` (per-appliance `.run` volume),
-  `SENTIN8_CAPTAIN_SOCK` (host-bind-mounted socket dir), and - because
-  the operator env names HOST paths/hosts - `SENTIN8_SECRETS_DIR`,
-  `SENTIN8_M2M_CREDENTIALS_DIR`, `SENTIN8_TLS_CA_PEM` (the mounted
-  public chain), `SENTIN8_ACME_DATA_DIR` (the mounted platform CA dir
-  - the appliance's acme IS the platform CA; the keys persist on the
-  host, so an appliance rebuild never rotates the identity), and the
-  infra coordinates `SENTIN8_VALKEY_HOST`/`SENTIN8_PG_HOST` +
-  `VALKEY_URL`/`DATABASE_URL` rewrites pointing at the compose service
-  names (`sentin8core-valkey`, `sentin8core-postgres`). Per-service
-  DSNs (`SENTIN8_{SVC}_DATABASE_URL`, `..._POLICY_DATABASE_URL`) are
-  exported when unset - several services fall back to the SDK's
-  hardcoded `sentin8_app@localhost` DSN, which is the HOST view.
+- **Env contract (compose `environment:` - visible to EVERY in-container
+  process)**: the whole appliance contract rides the compose
+  `environment:` block, so `docker exec` sessions (the in-container
+  CLI) render the same plane the services see - the infra probes in
+  `captain services` need the cert identities + DSNs exactly like a
+  service does. The block carries: `SENTIN8_SECRETS_DIR`
+  (`/mnt/host-secrets`), `SENTIN8_M2M_CREDENTIALS_DIR`, the cert-path
+  vars (`SENTIN8_TLS_CA_PEM`/`SENTIN8_TLS_CLIENT_CA_PEM` - the mounted
+  public chain), `SENTIN8_VALKEY_HOST`/`SENTIN8_PG_HOST`,
+  `VALKEY_URL`/`DATABASE_URL` (the compose service names
+  `sentin8core-valkey`/`sentin8core-postgres`), and the per-service DSNs
+  (`SENTIN8_{SVC}_DATABASE_URL`, `..._POLICY_DATABASE_URL`) the SDK's
+  hardcoded `sentin8_app@localhost` fallbacks would otherwise resolve to
+  the HOST view. The entrypoint sources the operator `.env` (bind-mounted
+  read-only) for the OPERATOR-owned values (acme data dir, feature
+  flags, knobs) and fills only what the operator env left unset
+  (fill-when-unset: an operator-set value wins, compose values win only
+  as defaults). Appliance-owned runtime paths the operator env cannot
+  name (`SENTIN8_RUN_DIR`/`SENTIN8_LOG_DIR` on the per-appliance `.run`
+  volume, `SENTIN8_CAPTAIN_SOCK` on the host-bind-mounted socket dir,
+  `SENTIN8_APP_DIR_HOST_PREFIX`/`..._LOCAL_PREFIX` for the split-plane
+  remap, `SENTIN8_AUTH_UI_DIR`) stay entrypoint exports.
 - **Bridge netns + service-name dialing (the verified model)**: postgres
   and valkey run as sibling containers on the appliance's bridge
   network, each publishing its port on host loopback; the machine
