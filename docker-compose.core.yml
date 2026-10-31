@@ -174,6 +174,7 @@ services:
       - ${TREE_ROOT}/sentin8/sentin8-captain/target:/opt/sentin8/sentin8-captain/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-cron/target:/opt/sentin8/sentin8-cron/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-db/target:/opt/sentin8/sentin8-db/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-ai/target:/opt/sentin8/sentin8-ai/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-flow/target:/opt/sentin8/sentin8-flow/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-func/target:/opt/sentin8/sentin8-func/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-post/target:/opt/sentin8/sentin8-post/target:ro
