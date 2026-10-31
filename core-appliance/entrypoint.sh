@@ -120,7 +120,7 @@ done
 # mounted content in place (upgrade-instance works verbatim; the LINK
 # target is the mounted path, never a copied file).
 PREFIX=/usr/bin
-for svc in acme ai app auth bff bus captain cron db flow func post proxy \
+for svc in acme ai app auth bff bus captain cli cron db flow func post proxy \
            secrets sign stat storage sys web; do
     bin="/opt/sentin8/sentin8-${svc}/target/release/sentin8-${svc}"
     if [ -x "$bin" ]; then
