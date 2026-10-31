@@ -112,17 +112,23 @@ for var in $(grep -oE '^[A-Z0-9_]+_DATABASE_URL=' /etc/sentin8/sentin8.env | tr 
     export "$var=$val"
 done
 
-# 3. The binary prefix: every mounted {repo}/target dir. The captain
-# resolves binaries through it; a host rebuild swaps the mounted content
-# in place, so upgrade-instance works against appliance keys verbatim.
-# The runtime profile matches the make core-up profile (debug by default -
-# the dev convention; SENTIN8_CORE_PROFILE=release for release).
-profile="${SENTIN8_CORE_PROFILE:-debug}"
-PREFIX=""
-for d in /opt/sentin8/*/target; do
-    [ -d "$d/$profile" ] && PREFIX="${PREFIX}${d}/${profile}:"
+# 3. The binaries: /usr/bin - the installed-package shape. The appliance
+# runs RELEASE-ONLY (group DESIGN.md §3.3): the mounted trees are
+# {repo}/target/release (core-up builds RELEASE), the captain resolves
+# spawns from the single dir /usr/bin, and every binary is linked there
+# by name (sentin8-acme, sentin8-auth, ...) - a host rebuild swaps the
+# mounted content in place (upgrade-instance works verbatim; the LINK
+# target is the mounted path, never a copied file).
+PREFIX=/usr/bin
+for svc in acme ai app auth bff bus captain cron db flow func post proxy \
+           secrets sign stat storage sys web; do
+    bin="/opt/sentin8/sentin8-${svc}/target/release/sentin8-${svc}"
+    if [ -x "$bin" ]; then
+        ln -sf "$bin" "$PREFIX/sentin8-${svc}"
+    else
+        echo "[appliance] WARN: missing release binary $bin - build the platform group first (make core-up)." >&2
+    fi
 done
-PREFIX="${PREFIX%:}"
 export SENTIN8_CAPTAIN_BINARY_PREFIX="$PREFIX"
 
 # The auth-ui web bundle mount (the auth service serves it read-only).
@@ -162,9 +168,9 @@ export SENTIN8_CAPTAIN_LAST_RESORT_RESPAWN_S=${SENTIN8_CAPTAIN_LAST_RESORT_RESPA
 # service in a never-ending flap (the 68x EPERM loop acme's own install
 # hit when it ran sandboxed).
 APPLIANCE_UID="$(id -u)"
-CAPTAIN="/opt/sentin8/sentin8-captain/target/${profile}/sentin8-captain"
+CAPTAIN="$PREFIX/sentin8-captain"
 if [ ! -x "$CAPTAIN" ]; then
-    echo "ERROR: $CAPTAIN not found - build the platform group first (make build)." >&2
+    echo "ERROR: $CAPTAIN not found - build the release fleet first (make core-up)." >&2
     exit 1
 fi
 if [ "$APPLIANCE_UID" = "0" ] && [ -f "$SENTIN8_TLS_CA_PEM" ]; then

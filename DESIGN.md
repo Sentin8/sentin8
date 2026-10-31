@@ -300,8 +300,16 @@ implicitly.
 
 - **Services in one container, one netns**: postgres + valkey + a `core`
   machine container (captain + the 17 platform binaries, bind-mounted
-  from the group's `sentin8-*/target/{profile}` trees - no image build;
-  the same debug binaries the operator builds). The machine identity is
+  from the group's `sentin8-*/target/release` trees - no image build).
+  The runtime is RELEASE-ONLY (no dev-profile appliance: the appliance
+  is the platform-under-test, its runtime profile never mixes with the
+  host dev loop's debug builds). The binaries surface as the
+  installed-package shape: the entrypoint (root) links each mounted
+  release binary into `/usr/bin/sentin8-{service}` before dropping to
+  uid 1000, and the appliance captain execs `/usr/bin/sentin8-captain`;
+  `SENTIN8_CAPTAIN_BINARY_PREFIX=/usr/bin` (a single dir - every spawn
+  resolves `<dir>/<binary>`, web apps ride `prefix/sentin8-web` with
+  `--web-root`). The machine identity is
   `SENTIN8_CAPTAIN_LOCAL_IP=127.0.0.1`: inside the container loopback is
   its own netns, and the four published entry ports make the plane
   reachable from the host - `443` (proxy ingress), `5432` (postgres),
@@ -357,13 +365,14 @@ implicitly.
   back to the bearer-gated published API (`:18000`).
 - **Boot convergence (the verified contract)**: the container boot is a
   connection storm (17 services × main+policy pools, TLS+cert-auth
-  handshakes through the bridge) against the SDK's 8s pool
-  acquire-timeout - some wave-2/3 services exceed it, crash 3 times,
-  and park. Captain's last-resort respawner (every 300s) converges the
-  fleet to fully Active on its own - `core-up` prints status and the
-  operator watches the final waves; no manual action needed. The
-  honest long-term fix is an SDK knob for the acquire timeout; the
-  appliance E2E proved the convergence path.
+  handshakes through the bridge). `SENTIN8_PG_ACQUIRE_TIMEOUT_S=30`
+  (the SDK's pool acquire knob) + the respawner's 3s spawn stagger ride
+  the storm out inside one spawn wave; captain's last-resort respawner
+  (30s heartbeat in the appliance) converges the fleet to fully Active
+  on its own - `core-up` waits for container health and prints status;
+  no manual action needed. `make core-up` builds RELEASE
+  (`RELEASE=--release`) - the appliance runtime profile is release and
+  its mount points carry only `$repo/target/release` binaries.
 - **Guards**: the platform group's `make start` refuses while the
   appliance container is up (the double-boot guard - two auth instances
   round-robining is a valid scale-out but never a dev intent);

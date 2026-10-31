@@ -30,13 +30,14 @@ RUN mkdir -p /var/lib/sentin8/run && chown -R 1000:1000 /var/lib/sentin8
 # gRPC-FUSE/WSL created an empty root-owned /opt/sentin8/... tree and the
 # entrypoint's exec hit "No such file or directory" on a binary that
 # provably existed on the host). The mount points exist; the binds then
-# propagate reliably.
+# propagate reliably. RELEASE-ONLY mount points (the appliance runtime
+# profile is release, group DESIGN.md §3.3).
 RUN for repo in sentin8-acme sentin8-auth sentin8-bff sentin8-bus \
                  sentin8-captain sentin8-cron sentin8-db sentin8-flow \
                  sentin8-func sentin8-post sentin8-proxy sentin8-secrets \
                  sentin8-sign sentin8-stat sentin8-storage sentin8-sys \
                  sentin8-web sentin8-cli; do \
-        mkdir -p "/opt/sentin8/$repo/target" "/opt/sentin8/$repo/target/debug" "/opt/sentin8/$repo/target/release"; \
+        mkdir -p "/opt/sentin8/$repo/target/release"; \
     done \
     && mkdir -p /mnt/host-secrets /etc/sentin8 /opt/sentin8/auth-ui-web \
     && chown -R 1000:1000 /opt/sentin8

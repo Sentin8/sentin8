@@ -258,20 +258,30 @@ CORE_COMPOSE := -f docker-compose.core.yml -p sentin8core
 SENTIN8_ACME_HOME ?= $(patsubst %/,%,$(dir $(shell grep -h '^SENTIN8_ACME_DATA_DIR=' ../.env 2>/dev/null | cut -d= -f2 | tr -d '\r')))
 CORE_ENV := TREE_ROOT=$(abspath ..) TREE_ROOT_ACME=$(SENTIN8_ACME_HOME)
 
-core-up: ## Bring the core appliance up (builds missing binaries first; waits for health)
+core-up: ## Bring the core appliance up (builds RELEASE binaries first; waits for health)
 	@test -f ../.env || { echo 'No ../.env - copy ../.env.example first.'; exit 1; }
 	@test -n "$(SENTIN8_ACME_HOME)" || { echo 'Set SENTIN8_ACME_HOME (the parent of SENTIN8_ACME_DATA_DIR, e.g. $$HOME/.sentin8) - the appliance mounts the platform CA dir.'; exit 1; }
-	@echo "==> core appliance: ensuring binaries (build skipped when fresh)"
-	$(MAKE) build-sdk build-starters build-services
+	@echo "==> core appliance: ensuring RELEASE binaries (build skipped when fresh)"
+	$(MAKE) RELEASE=--release build-sdk build-starters build-services
 	@$(MAKE) --no-print-directory infra-tls INFRA_SANS=sentin8core-postgres,sentin8core-valkey
-	@echo "==> core appliance: composing postgres + valkey + the machine container"
-	docker compose $(CORE_ENV) $(CORE_COMPOSE) up -d --build
-	@echo "==> core appliance: fixing fresh volume ownership (host uid - the initdb EPERM class)"
+	@echo "==> core appliance: STAGE 1 - infra (postgres + valkey)"
+	@echo "==> volume creation + fresh ownership (host uid): compose create materializes the volumes (NOT started); the chown then fixes ownership BEFORE the first boot - the containers run uid 1000 and a root-owned volume is unreadable (the initdb EPERM class)"
+	env $(CORE_ENV) docker compose $(CORE_COMPOSE) create --build postgres valkey
 	@for vol in sentin8core_sentin8core-pgdata sentin8core_sentin8core-valkeydata sentin8core_sentin8core-run; do \
-		docker run --rm -v "$$vol:/d" alpine chown 1000:1000 /d 2>/dev/null \
-			|| echo "WARN: could not fix ownership of $$vol"; \
-	done
-	@docker restart sentin8core-postgres sentin8core-valkey sentin8core-machine >/dev/null 2>&1 || true
+			docker run --rm -v "$$vol:/d" alpine chown 1000:1000 /d 2>/dev/null \
+				|| echo "WARN: could not fix ownership of $$vol"; \
+		done
+	env $(CORE_ENV) docker compose $(CORE_COMPOSE) up -d postgres valkey
+	@echo "==> core appliance: waiting for infra health (postgres + valkey healthy before anything dials them)"
+	@deadline=$$(( $$(date +%s) + 120 )); until [ "$$(docker inspect -f '{{.State.Health.Status}}' sentin8core-postgres 2>/dev/null)" = "healthy" ] \
+			&& [ "$$(docker inspect -f '{{.State.Health.Status}}' sentin8core-valkey 2>/dev/null)" = "healthy" ]; do \
+			if [ $$(date +%s) -gt $$deadline ]; then \
+				echo "ERROR: the appliance infra did not become healthy in 120s." >&2; exit 1; \
+			fi; sleep 2; done
+	@echo "==> core appliance: STAGE 2 - enroll (the valkey ACL + the DB bootstrap BEFORE any fleet connection - the fleet's first valkey connection must find its cert-identity user; the ACL lives in the valkey AOF and a wiped volume reverts to the stock default user)"
+	@$(MAKE) --no-print-directory -e enroll
+	@echo "==> core appliance: STAGE 3 - the machine container (captain + the 17 services)"
+	env $(CORE_ENV) docker compose $(CORE_COMPOSE) up -d --build core
 	@echo "==> core appliance: waiting for the machine container health"
 	@deadline=$$(( $$(date +%s) + 300 )); \
 	until [ "$$(docker inspect -f '{{.State.Health.Status}}' sentin8core-machine 2>/dev/null)" = "healthy" ]; do \
@@ -282,18 +292,19 @@ core-up: ## Bring the core appliance up (builds missing binaries first; waits fo
 		sleep 5; \
 	done
 	@echo "==> core appliance healthy. The platform core is in docker; verticals run on the host."
+	@echo "    release-only runtime; binaries surface as /usr/bin/sentin8-{svc} in the container"
 	@echo "    host CLI: export SENTIN8_CORE_APPLIANCE_IP=127.0.0.1 (per-key routing)"
-	@echo "    bootstrap on first boot: make enroll (the DB is virgin after core-down -v)"
+	@echo "    valkey ACL + DB bootstrap ride stage 2 (enroll) - re-run make enroll to refresh fragments"
 
 core-down: ## Graceful appliance stop (captain drains) + volume wipe (fresh initdb next up)
 	@echo "==> core appliance: stopping the in-container fleet (graceful)"
 	@if docker inspect sentin8core-machine >/dev/null 2>&1; then \
 		SENTIN8_SENTIN8_CAPTAIN_URL=http://127.0.0.1:18000 \
-		./sentin8-cli/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-cli captain stop \
+		./sentin8-cli/target/release/sentin8-cli captain stop \
 		  || echo "WARN: graceful stop failed (container down?) - proceeding to compose down."; \
 	fi
 	@echo "==> core appliance: compose down -v (volumes removed - fresh initdb next up)"
-	docker compose $(CORE_ENV) $(CORE_COMPOSE) down -v
+	env $(CORE_ENV) docker compose $(CORE_COMPOSE) down -v
 
 core-logs: ## Follow the appliance captain + service logs
 	@docker exec sentin8core-machine tail -n 200 -f /var/lib/sentin8/run/logs/captain.log 2>/dev/null \
@@ -301,7 +312,7 @@ core-logs: ## Follow the appliance captain + service logs
 
 core-status: ## Fleet rows across BOTH captains (appliance + host, when both are up)
 	@SENTIN8_SENTIN8_CAPTAIN_URL=http://127.0.0.1:18000 \
-		./sentin8-cli/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-cli captain services 2>/dev/null \
+		./sentin8-cli/target/release/sentin8-cli captain services 2>/dev/null \
 	  || echo "(appliance captain not reachable - is the appliance up? make core-up)"
 	@$(MAKE) --no-print-directory status
 
