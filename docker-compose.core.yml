@@ -249,6 +249,7 @@ services:
       # stable). ABSOLUTE paths (TREE_ROOT) - see the PATH FORM note above.
       - ${TREE_ROOT}/sentin8/sentin8-acme/target:/opt/sentin8/sentin8-acme/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-auth/target:/opt/sentin8/sentin8-auth/target:ro
+      - ${TREE_ROOT}/sentin8/sentin8-app/target:/opt/sentin8/sentin8-app/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-bff/target:/opt/sentin8/sentin8-bff/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-bus/target:/opt/sentin8/sentin8-bus/target:ro
       - ${TREE_ROOT}/sentin8/sentin8-captain/target:/opt/sentin8/sentin8-captain/target:ro
