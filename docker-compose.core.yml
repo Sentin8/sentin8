@@ -157,6 +157,86 @@ services:
       SENTIN8_CORE_CAPTAIN_URL: "http://127.0.0.1:18000"
       # The captain API port INSIDE the container stays the platform
       # default (8000); 18000 is only the published host side.
+      #
+      # ── THE APPLIANCE ENV CONTRACT (every in-container process sees it) ──
+      # The operator .env names HOST paths/hosts; inside the appliance the
+      # same plane is the mounted tree + the compose service names. The
+      # contract rides the compose environment (not entrypoint exports) so
+      # docker exec sessions - the in-container CLI first - probe infra and
+      # resolve cert identities exactly like a service does (the CLI's
+      # `captain services` infra summary needs the CA + the valkey-control
+      # pair; entrypoint-only env is invisible in exec processes).
+      # Runtime appliance paths that the operator env CANNOT name stay
+      # entrypoint exports (run/log dirs, captain sock, the app-dir remap).
+      SENTIN8_SECRETS_DIR: "/mnt/host-secrets"
+      SENTIN8_M2M_CREDENTIALS_DIR: "/mnt/host-secrets/m2m-credentials"
+      # The platform CA for outbound TLS (the PUBLIC chain - the acme data
+      # dir with the CA PRIVATE keys is not mounted here, by design; infra
+      # materializes the public chain under the secrets tree).
+      SENTIN8_TLS_CA_PEM: "/mnt/host-secrets/acme-ca/root-ca.crt"
+      SENTIN8_TLS_CLIENT_CA_PEM: "/mnt/host-secrets/acme-ca/root-ca.crt"
+      # Infra coordinates: the bridge netns dials infra BY COMPOSE SERVICE
+      # NAME (the server leaves carry these names as SANs via `make
+      # core-up`'s INFRA_SANS).
+      SENTIN8_VALKEY_HOST: "sentin8core-valkey"
+      SENTIN8_PG_HOST: "sentin8core-postgres"
+      VALKEY_URL: "valkeys://sentin8core-valkey:6379/0"
+      DATABASE_URL: "postgres://sentin8@sentin8core-postgres:5432/sentin8"
+      # Appliance-OWNED runtime paths (constants in this image - the
+      # operator env cannot name them meaningfully inside):
+      SENTIN8_RUN_DIR: "/var/lib/sentin8/run"
+      SENTIN8_LOG_DIR: "/var/lib/sentin8/run/logs"
+      # The host-bind-mounted UDS control socket (the host CLI's peer-cred
+      # path; the in-container CLI resolves its own captain the same way).
+      SENTIN8_CAPTAIN_SOCK: "/mnt/host-sock/captain.sock"
+      # The app-dir split-plane remap (see SDK remap_app_dir): the enroll
+      # pass writes HOST tree paths; the same trees are mounted here.
+      SENTIN8_APP_DIR_HOST_PREFIX: "${TREE_ROOT}/sentin8"
+      SENTIN8_APP_DIR_LOCAL_PREFIX: "/opt/sentin8"
+      SENTIN8_AUTH_UI_DIR: "/opt/sentin8/auth-ui-web"
+      # Per-service DSNs (main + Shield policy pool): several services
+      # fall back to the SDK's hardcoded `sentin8_app@localhost` DSN -
+      # the HOST view, unreachable in this netns. Spelled out (compose
+      # cannot loop); the entrypoint's fill-when-unset pass keeps honoring
+      # operator overrides for services NOT covered here.
+      SENTIN8_ACME_DATABASE_URL: "postgres://sentin8_acme_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_ACME_POLICY_DATABASE_URL: "postgres://sentin8_acme_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_AI_DATABASE_URL: "postgres://sentin8_ai_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_AI_POLICY_DATABASE_URL: "postgres://sentin8_ai_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_APP_DATABASE_URL: "postgres://sentin8_app_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_APP_POLICY_DATABASE_URL: "postgres://sentin8_app_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_AUTH_DATABASE_URL: "postgres://sentin8_auth_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_AUTH_POLICY_DATABASE_URL: "postgres://sentin8_auth_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_BFF_DATABASE_URL: "postgres://sentin8_bff_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_BFF_POLICY_DATABASE_URL: "postgres://sentin8_bff_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_BUS_DATABASE_URL: "postgres://sentin8_bus_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_BUS_POLICY_DATABASE_URL: "postgres://sentin8_bus_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_CAPTAIN_DATABASE_URL: "postgres://sentin8_captain_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_CAPTAIN_POLICY_DATABASE_URL: "postgres://sentin8_captain_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_CRON_DATABASE_URL: "postgres://sentin8_cron_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_CRON_POLICY_DATABASE_URL: "postgres://sentin8_cron_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_DB_DATABASE_URL: "postgres://sentin8_db_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_DB_POLICY_DATABASE_URL: "postgres://sentin8_db_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_FLOW_DATABASE_URL: "postgres://sentin8_flow_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_FLOW_POLICY_DATABASE_URL: "postgres://sentin8_flow_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_FUNC_DATABASE_URL: "postgres://sentin8_func_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_FUNC_POLICY_DATABASE_URL: "postgres://sentin8_func_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_POST_DATABASE_URL: "postgres://sentin8_post_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_POST_POLICY_DATABASE_URL: "postgres://sentin8_post_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_PROXY_DATABASE_URL: "postgres://sentin8_proxy_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_PROXY_POLICY_DATABASE_URL: "postgres://sentin8_proxy_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_SECRETS_DATABASE_URL: "postgres://sentin8_secrets_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_SECRETS_POLICY_DATABASE_URL: "postgres://sentin8_secrets_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_SIGN_DATABASE_URL: "postgres://sentin8_sign_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_SIGN_POLICY_DATABASE_URL: "postgres://sentin8_sign_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_STAT_DATABASE_URL: "postgres://sentin8_stat_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_STAT_POLICY_DATABASE_URL: "postgres://sentin8_stat_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_STORAGE_DATABASE_URL: "postgres://sentin8_storage_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_STORAGE_POLICY_DATABASE_URL: "postgres://sentin8_storage_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_SYS_DATABASE_URL: "postgres://sentin8_sys_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_SYS_POLICY_DATABASE_URL: "postgres://sentin8_sys_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_WEB_DATABASE_URL: "postgres://sentin8_web_service@sentin8core-postgres:5432/sentin8"
+      SENTIN8_WEB_POLICY_DATABASE_URL: "postgres://sentin8_web_service@sentin8core-postgres:5432/sentin8"
     ports:
       # The appliance's entry points - all pinned to host loopback (a dev
       # loopback plane, never a LAN exposure). postgres/valkey publish
