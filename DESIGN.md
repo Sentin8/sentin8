@@ -59,6 +59,18 @@ captain registry, MemBus, session store). Vertical groups carry **no**
 compose files; their services reach the same localhost endpoints. This
 mirrors production ownership: the platform operates the data plane.
 
+Both infra images are **PQ-capable by base OS**: PostgreSQL runs
+`pgvector/pgvector:pg18-trixie` (Debian 13, OpenSSL 3.5.x) and Valkey
+runs `valkey/valkey:9-alpine` (OpenSSL 3.5.x) - both parse ML-DSA-65 /
+SLH-DSA certificate chains and negotiate the X25519MLKEM768 TLS group
+(acme DESIGN "CA families per mode"). The image choice is a
+TLS-verification requirement, not a preference: the bookworm-based
+`pgvector:pg18` tag ships OpenSSL 3.0, which cannot parse PQ signatures
+at all. The infra TLS MATERIAL mints through the ACTIVE mode's family
+(PQCLIENT-2): the sqlx transport is native-tls (system OpenSSL 3.5.x),
+which parses and presents ML-DSA-65 client keys and verifies ML-DSA
+chains - the Rust client plane can do PQ TLS to the data plane.
+
 ### 3.1 Valkey certificate identity (auth DESIGN §4.3f)
 
 The Valkey plane runs on **certificate identity** - the same Acme-issued
@@ -182,9 +194,26 @@ sequenceDiagram
   `PgConnectOptions` with `VerifyFull` + root CA + client identity,
   and REJECTS DSNs carrying a password component - a password-bearing
   DSN is a misconfiguration, not a degraded mode.
-- **SQLX feature**: every workspace `Cargo.toml` enables sqlx's
-  `tls-rustls-ring` feature (sqlx 0.8 compiles NO TLS support without
-  it; DSNs may gain `sslmode=verify-full`).
+- **SQLX transport (native-tls)**: every workspace `Cargo.toml` enables
+  sqlx's `tls-native-tls` feature - the PG transport runs on the system
+  OpenSSL (3.5.x on both the dev host and the appliance runtime), not
+  on rustls. Rationale (PQCLIENT-2): sqlx 0.8's rustls features hardcode
+  their crypto provider (`ring` or `aws-lc-rs`) with NO public injection
+  API - ring cannot parse ML-DSA-65 client keys or verify ML-DSA chains,
+  so a rustls-based sqlx transport structurally cannot serve the
+  exclusive posture. The system OpenSSL parses ML-DSA-65 private keys
+  (verified live: `openssl pkey` on the exclusive family's material) and
+  builds ML-DSA/X25519MLKEM768 handshakes - the same library family the
+  PostgreSQL server itself terminates TLS with, making the link's two
+  halves one crypto stack. The full contract is unchanged:
+  `PgConnectOptions` feeds the root CA, client identity, and
+  `VerifyFull` through `native_tls::Identity::from_pkcs8` (PEM cert
+  stack + PKCS#8 PEM key - the exact format the m2m mint loop writes).
+  Every OTHER TLS surface in the fleet (sentin8-tls service plane,
+  reqwest outbound HTTPS, valkey-glide) keeps the platform's own
+  pure-Rust PQ provider (PQCLIENT-1's `install_platform_provider`).
+  sqlx 0.8 compiles NO TLS support without a TLS feature; DSNs may gain
+  `sslmode=verify-full`.
 - **DSN derivation **: under certificate identity a
   service DSN is PURE STRUCTURE - role + host + database, no secret -
   so every service's DSN derives from the `service_type` it already

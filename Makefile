@@ -231,16 +231,14 @@ infra-tls: ## Materialize the infra TLS material (Valkey + PostgreSQL server lea
 	./sentin8-acme/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-acme \
 		--ensure-infra-tls \
 		$(if $(INFRA_SANS),--infra-sans=$(INFRA_SANS)) \
-		--mint-workloads=sentin8:acme,sentin8:ai,sentin8:app,sentin8:auth,sentin8:bff,sentin8:bus,sentin8:cron,sentin8:db,sentin8:flow,sentin8:func,sentin8:post,sentin8:proxy,sentin8:secrets,sentin8:stat,sentin8:storage,sentin8:sys,sentin8:web
+                --mint-workloads=sentin8:acme,sentin8:ai,sentin8:app,sentin8:auth,sentin8:bff,sentin8:bus,sentin8:cron,sentin8:db,sentin8:flow,sentin8:func,sentin8:post,sentin8:proxy,sentin8:secrets,sentin8:sign,sentin8:stat,sentin8:storage,sentin8:sys,sentin8:web
+MODES ?=
+ca-tls: ## Ensure the CA root + intermediate per PQ mode (default: active; MODES=a,b,c for specific)
+	@set -a; . ../.env; set +a; \
+	./sentin8-acme/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-acme \
+		--ensure-ca \
+		$(if $(MODES),--modes=$(MODES))
 
-infra-up: ## Start dev PostgreSQL 18 + Valkey (THE tree-wide infra, §2.2.1)
-	@$(MAKE) --no-print-directory infra-tls
-	@docker compose up -d
-
-infra-down: ## Stop the dev infra
-	@docker compose down
-
-# ── The core appliance (group DESIGN.md §3.3, captain DESIGN §11.11) ────────
 # The dev split-plane: the platform CORE (postgres + valkey + one machine
 # container running captain + the 17 services) in a SECOND compose project,
 # verticals on the host. Opt-in - `make start` refuses while the appliance

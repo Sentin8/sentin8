@@ -30,7 +30,11 @@ services:
   postgres:
     # pgvector image (AI design §6 - hybrid retrieval; the plain postgres
     # image cannot provide the `vector` type sentin8-ai's schema needs).
-    image: pgvector/pgvector:pg18
+    # The TRIXIE base (Debian 13) carries OpenSSL 3.5.x - ML-DSA/SLH-DSA
+    # certificate verification and X25519MLKEM768 key exchange (the PQ
+    # data-plane posture, PQCA-2; the bookworm-based pg18 tag ships
+    # OpenSSL 3.0 which cannot parse PQ signatures at all).
+    image: pgvector/pgvector:pg18-trixie
     container_name: sentin8-postgres
     # The Sentin8 fleet runs ~20 microservices against this one PostgreSQL
     # instance. Each service caps its pool at 3 connections (see

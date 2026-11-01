@@ -54,7 +54,12 @@ services:
   # netns (`sentin8core-postgres:5432`) - the server leaf carries that
   # name via `make infra-tls INFRA_SANS=...` (verify-full needs the SAN).
   postgres:
-    image: pgvector/pgvector:pg18
+    # Same image + TLS-only command as the base infra (§3.1) - the TRIXIE
+    # base (Debian 13) carries OpenSSL 3.5.x: ML-DSA/SLH-DSA verification
+    # and X25519MLKEM768 key exchange (the PQ data-plane posture, PQCA-2;
+    # the bookworm-based pg18 tag ships OpenSSL 3.0 which cannot parse PQ
+    # signatures at all).
+    image: pgvector/pgvector:pg18-trixie
     container_name: sentin8core-postgres
     command: >
       postgres

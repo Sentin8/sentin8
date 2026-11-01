@@ -1,0 +1,43 @@
+# Sentin8 Platform Backlog
+
+The platform's single backlog. Every story carries an ID, a priority
+(`P0`-`P3`), an estimate (`S`/`M`/`L`), and a one-line description
+referencing the design section that specifies it. Mark a story done in
+the same change that implements it.
+
+## Stories
+
+| ID | Priority | Estimate | Description | Status |
+|----|----------|----------|-------------|--------|
+| PQCA-3 | P1 | S | Mode-namespaced CA subjects: every root/intermediate CN derives from `SENTIN8_TLS_PQ_MODE` (`Sentin8 {Exclusive\|Hybrid\|Classical} Root/Intermediate CA`), intermediate carries `OU=Sentin8:ACME`, root carries no OU (CABF BR 7.1.2.10.2). Design: `sentin8-acme/DESIGN.md` "CA subject names per mode (PQCA-3)" | Done |
+| INFRA-PQC | P1 | S | PQ-capable data plane: swap the PostgreSQL infra image to `pgvector/pgvector:pg18-trixie` (Debian 13, OpenSSL 3.5.x - ML-DSA/SLH-DSA verification + X25519MLKEM768; the bookworm `pg18` tag ships OpenSSL 3.0 which cannot parse PQ signatures) in both compose files. Design: group `DESIGN.md` §3 "The Infrastructure Contract", acme `DESIGN.md` "CA families per mode (PQCA-2)" | Done |
+| CAMINT-1 | P1 | M | CA-plane CLI on the acme binary: `--ensure-ca [--modes=...]` ensures root+intermediate per mode (default active; multi-mode safe by per-mode dir scoping), `--ensure-infra-tls` becomes family-aware (classical → `CaHierarchy`, hybrid/exclusive → `PqCaHierarchy`; PQ leafs use the Subscriber `ca:false` profile, never Subordinate), leaf reuse checks the signature family, and the `{secrets}/acme-ca` chain copy republishes from the active family. `make ca-tls` wrapper. Design: acme `DESIGN.md` "Offline CLI modes (CAMINT-1)" | Done |
+| INFRAFIX-1 | P0 | S | Roll back the family-aware INFRA mint: the infra plane (PG/Valkey server leafs, ops/control/admin pairs, the m2m workload pairs) mints through the CLASSICAL family always - the Rust client plane (sqlx `tls-rustls-ring`: ring cannot load ML-DSA keys or verify ML-DSA certs; glide unaudited) cannot present PQ keys, so the family-aware mint broke `make enroll` under `exclusive`. PQCA-2's original boundary restored. Design: acme `DESIGN.md` PQCA-2 (client-plane dependency note) | Done |
+| PQCLIENT-1 | P1 | M | Pure-Rust PQ certificate VERIFICATION in `sentin8-tls` (`pq_verify.rs`): `MlDsa65Verify` + `SlhDsaSha2_128sVerify` `SignatureVerificationAlgorithm` impls over the RustCrypto `ml-dsa`/`slh-dsa` crates, merged into `sentin8_pq_provider()`'s `WebPkiSupportedAlgorithms` (+ the `SignatureScheme::ML_DSA_65` mapping). Composes with the existing `PqKeyProvider` (signing) so the service plane verifies and presents PQ certs end to end; reqwest's no-provider path honors the installed provider so outbound HTTPS inherits it. Design: sentin8-tls README §4 + acme DESIGN PQCA-2 | Done |
+| PQCLIENT-2 | P1 | M | sqlx client-plane PQ enablement: swap every workspace's sqlx TLS transport `tls-rustls-ring` → `tls-native-tls` (system OpenSSL 3.5.7 - parsed ML-DSA-65 keys verified live; `PgConnectOptions` feeds roots + client identity + VerifyFull unchanged through `Identity::from_pkcs8`), install the PQ provider at every binary entry point (`install_platform_provider`), serve the PQ CA family from the acme runtime (`AppState.ca: CaFamily`), remove the INFRAFIX-1 classical pin so the infra mint dispatches to the ACTIVE mode's family, then re-mint the infra plane exclusive and verify `make enroll` + fleet boot live against ML-DSA ops/workload pairs. The rustls plane keeps the platform's pure-Rust provider (PQCLIENT-1) for every non-sqlx TLS surface. Design: group `DESIGN.md` §3.2 "SQLX transport", acme `DESIGN.md` PQCA-2 | Done |
+
+## Done
+
+- **PQCLIENT-2** (P1, M) - The PostgreSQL data plane runs the exclusive
+  posture end to end: sqlx's TLS transport is native-tls (system OpenSSL
+  3.5.x, which parses ML-DSA-65 client keys and verifies ML-DSA chains -
+  live-verified), every binary entry point installs the platform PQ
+  provider (`install_platform_provider`: PQ verification + ML-DSA key
+  loading for the rustls plane), the acme runtime serves the active
+  family (`AppState.ca: CaFamily`), the INFRAFIX-1 classical pin is
+  removed (infra leafs mint through the active family), and the whole
+  flow is verified live: exclusive-family infra material (ML-DSA-65
+  server leaf + ops pair + workload pairs), `make enroll` exit 0,
+  18/18 services Active, end-to-end HTTPS 200 through the proxy.
+- **PQCA-3** (P1, S) - Mode-namespaced CA subjects with `OU=Sentin8:ACME`
+  on the intermediate and a root with no OU per the CABF root profile.
+  Implemented in `sentin8-acme` (`src/ca.rs`, `src/pq_ca.rs`,
+  `src/admin_ui.rs`, `tests/integration.rs`); design in
+  `sentin8-acme/DESIGN.md` "CA subject names per mode (PQCA-3)".
+- **INFRA-PQC** (P1, S) - PQ-capable data plane: PostgreSQL image swapped
+  to `pgvector/pgvector:pg18-trixie` (OpenSSL 3.5.x) in `docker-compose.yml`
+  and `docker-compose.core.yml`; Valkey (`9-alpine`, OpenSSL 3.5.x) already
+  PQ-capable. Verified live: OpenSSL 3.5.7 builds, verifies, and handshakes
+  ML-DSA-65/SLH-DSA certs with X25519MLKEM768. The remaining classical-chain
+  consumer is the browser edge (Chromium ML-DSA verification unconfirmed on
+  this tree's build). Design: group `DESIGN.md` §3, acme `DESIGN.md` PQCA-2.
