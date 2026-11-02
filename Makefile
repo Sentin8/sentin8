@@ -80,7 +80,7 @@ BINARY_DIR = $(if $(RELEASE),release,debug)
 # Absolute (abspath) — the CLI runs cargo-run from sentin8-cli/, and a
 # spawned captain resolves prefix entries relative to ITS cwd; relative
 # entries never resolve (RS §4.5.1-1).
-BINARY_PREFIX = $(subst $(space),:,$(foreach d,$(shell for d in sentin8-* ; do [ -d "$$d/target/$(BINARY_DIR)" ] && echo "$$d/target/$(BINARY_DIR)"; done),$(abspath $(d))))
+BINARY_PREFIX = $(subst $(space),:,$(foreach d,$(shell for g in sentin8-*/ ../bank8/bank8-*/ ../hotel8/hotel8-*/ ../openfin8/openfin8-*/ ../email8/email8-*/ ../exchange8/exchange8-*/ ../bill8/bill8-*/ ../trade8/trade8-*/ ; do [ -d "$$g/target/$(BINARY_DIR)" ] && echo "$$g/target/$(BINARY_DIR)"; done),$(abspath $(d))))
 space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-flutter build-one clean start stop status \
