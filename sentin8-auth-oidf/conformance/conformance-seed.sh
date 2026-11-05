@@ -389,6 +389,18 @@ print(json.dumps({
 PYGENHAIP
 )"
   HAIP_LEAF_DER_B64="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['leaf_der_b64'])")"
+  # An EMPTY issuance
+  # JSON means the tenant JWKS carries no ES256 key - the pass-1
+  # profile PUT has not made the ES256 family resolve on this host yet
+  # (a stale host-context cache, or the seed ran before the env row).
+  # Writing the attestation row now would land with EMPTY anchors and
+  # the family's attestation tests would fail far from the cause.
+  # Fail loud (DESIGN §9a.5, seed step 2): report the state and let
+  # the operator re-run the seed.
+  if [ -z "$HAIP_LEAF_DER_B64" ]; then
+    log "FATAL: vci_haip issuance chain NOT built - no ES256 key in the JWKS at $CERT_AUTH_HOST (the pass-1 profile PUT must land first; a stale host-context cache may pin the tenant to the platform family - re-run the seed)"
+    exit 1
+  fi
   HAIP_CA_PEM="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ca_pem'])")"
   # x5c leaf PEM for the seed-out + the profile JSON fields.
   HAIP_LEAF_PEM="$(python3 - "$HAIP_LEAF_DER_B64" <<'PYHAIPPEM'

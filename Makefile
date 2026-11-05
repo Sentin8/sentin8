@@ -178,6 +178,19 @@ clean: ## Clean every child repo (target/, build artifacts, local .run/.tmp)
 # the Makefile never sets it.
 PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:stat,sentin8:secrets,sentin8:sign,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
 
+infra-up: ## Dev infra plane: compose up (postgres + valkey; fresh volumes = fresh initdb)
+	@if [ ! -f ../.run/secrets/infra-tls/postgres-server.crt ]; then \
+		echo 'infra-tls material missing - running make infra-tls first'; \
+		$(MAKE) --no-print-directory infra-tls; \
+	fi
+	@for vol in sentin8_sentin8-pgdata sentin8_sentin8-valkeydata; do \
+		docker run --rm -v $$vol:/d alpine chown -R 1000:1000 /d 2>/dev/null || true; \
+	done
+	docker compose up -d postgres valkey
+
+infra-down: ## Dev infra plane: compose down (volumes KEPT; infra stays warm)
+	docker compose stop postgres valkey && docker compose rm -f postgres valkey
+
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
 	@if docker inspect sentin8core-machine >/dev/null 2>&1 && \
@@ -379,6 +392,7 @@ test-openapi: ## Run every platform drift-guard test (OAPEC §4.8 — the nightl
 # below keeps whatever ../.env declares (production posture).
 start-conformance: ## Start the platform fleet in the rig posture (classical TLS + FAPI ciphers + self-signed client certs)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
+	@$(MAKE) --no-print-directory infra-up
 	@export SENTIN8_CAPTAIN_BINARY_PREFIX="$(BINARY_PREFIX)"; \
 	export SENTIN8_TLS_PQ_MODE=classical; \
 	export SENTIN8_TLS_CIPHER_PROFILE=fapi; \
