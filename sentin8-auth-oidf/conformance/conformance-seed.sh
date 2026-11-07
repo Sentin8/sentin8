@@ -536,6 +536,16 @@ BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_se
 POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
 PKCE_JSON="$(dcr "cert-public-pkce" '"token_endpoint_auth_method":"none"')"
 
+# RFC 8628 device-flow client - the rotate-keys module's operator grant
+# (the platform key rotation - see runner.ts's device block). It rides a
+# DEDICATED public client in the SAME cert env as every other suite
+# client: the device endpoint resolves its client row under the cert
+# env's RLS context, so a platform client (sentin8-cli lives in the
+# system env) answers 401 invalid_client here. Grant-type opt-in
+# (oauth grant gate), public auth method, and admin:write in the scope
+# (the approving cert-user's role union carries the rest).
+DEVICE_JSON="$(dcr "cert-device" "\"grant_types\":[\"urn:ietf:params:oauth:grant-type:device_code\"],\"token_endpoint_auth_method\":\"none\",\"scope\":\"openid profile email sentin8:auth:admin:write\"")"
+
 # CIBA client: ping delivery points at the suite callback (poll + ping).
 # Single-line JSON (curl -d with embedded newlines inside quoted values
 # broke the body in the shell heredoc shape).
@@ -609,6 +619,7 @@ emit_client post "$POSTC_JSON"
 emit_client pkce "$PKCE_JSON"
 emit_client ciba "$CIBA_JSON"
 emit_client ciba2 "$CIBA2_JSON"
+emit_client device "$DEVICE_JSON"
 
 # OID4VCI issuer static client (the plan's happy-flow family runs
 # client_registration=static_client): private_key_jwt + its own EC jwks
@@ -859,6 +870,33 @@ if [ -n "$USER_ID" ]; then
   log "cert user phone + address + profile family set ($USER_ID)"
 else
   log "WARN: cert user not found via admin API - phone/address/profile NOT provisioned"
+fi
+
+# ── 3b. Cert user's operator role (the rotate-keys module's grant) ──
+# The RFC 8628 device-flow key rotation (the rig's operator action)
+# needs the sentin8:auth:admin:write scope - carried by the env's
+# sentin8:auth:admin role. The device token's scope = the client's
+# registered scopes ∩ the approving user's LIVE role scopes, so the
+# CERT USER (not the device client) must hold the role. Assigned
+# through the admin API (no direct SQL - E2E rule); idempotent (the
+# endpoint inserts ON CONFLICT DO NOTHING).
+if [ -n "$USER_ID" ]; then
+  AUTH_ADMIN_ROLE_ID="$(ccall auth GET "/v1/admin/roles" --env "$ENV_ID" | python3 -c "
+import json,sys
+try:
+    items=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = items.get('roles', items) if isinstance(items, dict) else items
+print(next((r.get('id','') for r in items if r.get('name')=='sentin8:auth:admin'), ''))
+")"
+  if [ -n "$AUTH_ADMIN_ROLE_ID" ] && [ -n "$USER_ID" ]; then
+    ccall auth POST "/v1/admin/roles/$AUTH_ADMIN_ROLE_ID/members" --env "$ENV_ID" --body "{\"user_id\":\"$USER_ID\"}" >/dev/null \
+      && log "sentin8:auth:admin role granted to the cert user ($AUTH_ADMIN_ROLE_ID -> $USER_ID)" \
+      || log "WARN: role grant failed (may already exist - continuing)"
+  else
+    log "WARN: sentin8:auth:admin role not found in the env - grant skipped"
+  fi
 fi
 
 # ── 4. Persist the suite configuration inputs ─────────────────────────
