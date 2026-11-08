@@ -366,15 +366,24 @@ if [ "$PROFILE" == "vci_haip" ] || [ "$PROFILE" == "vp" ]; then
   # from the live JWKS). The profile carries leaf (std-b64 DER) + CA
   # (PEM); the harness pins the SAME CA as the credential/status trust
   # anchor. The issuer never holds the CA key.
+  #
+  # RICAL (ISO/IEC 18013-5 Annex F.3.2): the SAME block mints the Reader
+  # Issuer CA List - the COSE_Sign1-signed CBOR document listing the
+  # issuance CA as a reader CA (isTrustAnchor=true). The suite's
+  # RicalTrustManager resolves the request object's x5c chain BY THE
+  # LEAF'S AKI against the RICAL entries' SKI - so the CA gains a SKI
+  # extension and the leaf an AKI (multipaz findCaCertificate).
   HAIP_JWKS="$(curl -sk "$CERT_AUTH_HOST/.well-known/jwks.json")"
-  HAIP_ISSUANCE_JSON="$(export HAIP_JWKS HAIP_ISSUER_URL="$CERT_AUTH_HOST"; python3 <<'PYGENHAIP'
+  HAIP_ISSUANCE_JSON="$(export HAIP_JWKS HAIP_ISSUER_URL="$CERT_AUTH_HOST" HAIP_RICAL_URL="$CERT_AUTH_HOST/.well-known/rical"; python3 <<'PYGENHAIP'
 import os, json, base64, datetime
 import cryptography.hazmat.primitives.asymmetric.ec as ec
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import NameOID, ExtensionOID
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 issuer_url = os.environ["HAIP_ISSUER_URL"]
+rical_url = os.environ.get("HAIP_RICAL_URL", "")
 d = json.loads(os.environ["HAIP_JWKS"])
 import sys
 pub = next((k for k in d.get("keys", [])
@@ -397,7 +406,16 @@ ca = (x509.CertificateBuilder()
       .not_valid_before(now - datetime.timedelta(days=1))
       .not_valid_after(now + datetime.timedelta(days=3650))
       .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+      .add_extension(x509.KeyUsage(
+          digital_signature=True, key_cert_sign=True, crl_sign=True,
+          content_commitment=False, data_encipherment=False,
+          encipher_only=False, decipher_only=False,
+          key_agreement=False, key_encipherment=False), critical=True)
+      .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
       .sign(ca_key, hashes.SHA256()))
+ca_ski = ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value.digest
+# The serial stays a python int (the RICAL entry encodes it as a CBOR
+# uint - ValidateRicalStructure: "'serialNumber' must be a biguint...").
 leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_url)])
 leaf = (x509.CertificateBuilder()
         .subject_name(leaf_name).issuer_name(ca_name)
@@ -405,13 +423,170 @@ leaf = (x509.CertificateBuilder()
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=3650))
+        # multipaz validateCertificationTrustPath: the chain's FIRST
+        # cert (the request object's signer) must carry the
+        # digitalSignature key usage ("Certificate is not a signing
+        # certificate" otherwise).
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_cert_sign=False, crl_sign=False,
+            content_commitment=False, data_encipherment=False,
+            encipher_only=False, decipher_only=False,
+            key_agreement=False, key_encipherment=False), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(pk), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+            x509.SubjectKeyIdentifier(ca_ski)), critical=False)
         .sign(ca_key, hashes.SHA256()))
+
+# ── The RICAL (ISO/IEC 18013-5 Annex F.3.2) ───────────────────────
+# A COSE_Sign1: protected header {alg: -7 (ES256), x5chain: [provider
+# cert DER]} (labels 1 and 33), payload = the CBOR map below. The RICAL
+# provider is the ecosystem operator publishing the reader CA list -
+# the seed mints its key + self-signed cert, and lists the issuance CA
+# as the reader CA (isTrustAnchor=true, no trust constraints).
+
+# Minimal CBOR encoder (RFC 8949): the RICAL uses tstr-keyed maps,
+# arrays, bstr, tstr, booleans, and small/negative ints - no tags
+# except the date-time strings (standard tag 0 wrapping an ISO-8601
+# tstr - multipaz's getAsDateTimeString requires Tagged(0, Tstr)).
+def _head(major, val):
+    m = major << 5
+    if val < 24:
+        return bytes([m | val])
+    elif val < 0x100:
+        return bytes([m | 24, val])
+    elif val < 0x10000:
+        return bytes([m | 25]) + val.to_bytes(2, "big")
+    elif val < 0x100000000:
+        return bytes([m | 26]) + val.to_bytes(4, "big")
+    else:
+        return bytes([m | 27]) + val.to_bytes(8, "big")
+
+def cbor_tstr(s):
+    return _head(3, len(s)) + s.encode()
+
+def cbor_bstr(b):
+    return _head(2, len(b)) + b
+
+def cbor_int(n):
+    # A CBOR integer: uints up to 64 bits via the head, the tag-2
+    # biguint (an unsigned-bignum byte string - RFC 8949 3.4.3) for
+    # larger serials (ValidateRicalStructure accepts both forms),
+    # negative ints via the standard major-1 head.
+    if n < 0:
+        return _head(1, -n - 1)
+    if n < 2 ** 64:
+        return _head(0, n)
+    big = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return cbor_tagged(2, cbor_bstr(big))
+
+def cbor_bool(v):
+    return bytes([0xF5 if v else 0xF4])
+
+def cbor_null():
+    return bytes([0xF6])
+
+def cbor_tagged(tag, inner):
+    return _head(6, tag) + inner
+
+def cbor_date(iso):
+    # RFC 8949 3.3.1 tag 0: a text string with an ISO-8601 date/time.
+    return cbor_tagged(0, cbor_tstr(iso))
+
+def cbor_array(items):
+    out = _head(4, len(items))
+    for it in items:
+        out += it
+    return out
+
+def cbor_map(pairs):
+    out = _head(5, len(pairs))
+    for k, v in pairs:
+        out += k
+        out += v
+    return out
+
+rical_provider_key = ec.generate_private_key(ec.SECP256R1())
+rical_provider_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sentin8-rical-provider")])
+rical_provider_cert = (x509.CertificateBuilder()
+      .subject_name(rical_provider_name).issuer_name(rical_provider_name)
+      .public_key(rical_provider_key.public_key())
+      .serial_number(x509.random_serial_number())
+      .not_valid_before(now - datetime.timedelta(days=1))
+      .not_valid_after(now + datetime.timedelta(days=3650))
+      .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+      .add_extension(x509.SubjectKeyIdentifier.from_public_key(rical_provider_key.public_key()), critical=False)
+      .sign(rical_provider_key, hashes.SHA256()))
+
+def iso(dt):
+    # kotlin.time.Instant.parse form: RFC 3339 with explicit offset.
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+date_now = now
+next_update = now + datetime.timedelta(days=30)
+not_after = now + datetime.timedelta(days=3650)
+
+payload = cbor_map([
+    (cbor_tstr("version"), cbor_tstr("1.0")),
+    (cbor_tstr("provider"), cbor_tstr("sentin8-conformance")),
+    (cbor_tstr("date"), cbor_date(iso(date_now))),
+    (cbor_tstr("type"), cbor_tstr("https://openid.net/conformance/rical")),
+    (cbor_tstr("nextUpdate"), cbor_date(iso(next_update))),
+    (cbor_tstr("notAfter"), cbor_date(iso(not_after))),
+    # `id` OMITTED (getOrNull -> null; a present id must be a number).
+    (cbor_tstr("latestRicalUrl"), cbor_tstr(rical_url)),
+    (cbor_tstr("extensions"), cbor_map([])),
+    (cbor_tstr("certificateInfos"), cbor_array([
+        cbor_map([
+            (cbor_tstr("certificate"), cbor_bstr(ca.public_bytes(serialization.Encoding.DER))),
+            (cbor_tstr("isTrustAnchor"), cbor_bool(True)),
+            (cbor_tstr("ski"), cbor_bstr(ca_ski)),
+            # ValidateRicalStructure requires serialNumber (the CA
+            # certificate's serial - a CBOR uint, the biguint form).
+            (cbor_tstr("serialNumber"), cbor_int(ca.serial_number)),
+            (cbor_tstr("trustConstraints"), cbor_array([])),
+            (cbor_tstr("extensions"), cbor_map([])),
+        ]),
+    ])),
+])
+
+# COSE_Sign1 (RFC 9052 4.1): [protected bstr, unprotected map, payload
+# bstr, signature bstr]; Sig_structure = ["Signature1", protected,
+# external_aad, payload] signed with ES256 (-7).
+protected = cbor_map([
+    (cbor_int(1), cbor_int(-7)),
+    (cbor_int(33), cbor_array([cbor_bstr(rical_provider_cert.public_bytes(serialization.Encoding.DER))])),
+])
+sig_structure = cbor_array([
+    cbor_tstr("Signature1"),
+    cbor_bstr(protected),
+    cbor_bstr(b""),
+    cbor_bstr(payload),
+])
+sig_der = rical_provider_key.sign(sig_structure, ec.ECDSA(hashes.SHA256()))
+# DER (r,s) -> two fixed-width 32-byte big-endian ints (the COSE ES256
+# raw signature form, RFC 9053 2.1).
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+r, s = decode_dss_signature(sig_der)
+def b64u_int(n):
+    b = n.to_bytes((n.bit_length() + 7) // 8 or 1, "big")
+    return b
+cose_sig = b64u_int(r) + b64u_int(s)
+# P-256 signature = raw 64-byte r||s
+cose_sign1 = cbor_array([
+    cbor_bstr(protected),
+    cbor_map([]),
+    cbor_bstr(payload),
+    cbor_bstr(cose_sig),
+])
+rical_b64 = base64.b64encode(cose_sign1).decode()
+
 print(json.dumps({
   "leaf_der_b64": base64.b64encode(leaf.public_bytes(serialization.Encoding.DER)).decode(),
   "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
   "x": x_b64,
   "y": y_b64,
   "kid": pub["kid"],
+  "rical_b64": rical_b64,
 }))
 PYGENHAIP
 )"
@@ -445,6 +620,10 @@ PYHAIPPEM
   HAIP_CA_PEM_EXPORTED="$HAIP_CA_PEM"
   HAIP_LEAF_DER_B64_EXPORTED="$HAIP_LEAF_DER_B64"
   HAIP_ISSUER_XY_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kid'], d['x'], d['y'])")"
+  # The RICAL (Annex F.3.2) - std-base64 COSE_Sign1. The spec pins it
+  # as client.rical (the suite's RegisterRical reads it from the
+  # Client section; base64-decoded to bytes).
+  HAIP_RICAL_B64_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('rical_b64',''))")"
 fi
 PROFILE_PUT_OUT="$(ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"scope\":\"env\",
@@ -681,6 +860,9 @@ echo "attester_pem(vciatt)=$VCIATT_PEM" >> "$SEED_OUT"
 [ -n "${HAIP_CA_PEM_EXPORTED:-}" ] && echo "haip_issuer_ca_pem(haip)=$HAIP_CA_PEM_EXPORTED" >> "$SEED_OUT"
 [ -n "${HAIP_LEAF_DER_B64_EXPORTED:-}" ] && echo "haip_issuer_leaf_der_b64(haip)=$HAIP_LEAF_DER_B64_EXPORTED" >> "$SEED_OUT"
 [ -n "${HAIP_ISSUER_XY_EXPORTED:-}" ] && echo "haip_issuer_xy(haip)=$HAIP_ISSUER_XY_EXPORTED" >> "$SEED_OUT"
+# The RICAL rides the seed-out as ONE std-base64 line (the COSE_Sign1
+# bytes - no newlines; the spec regex reads it whole).
+[ -n "${HAIP_RICAL_B64_EXPORTED:-}" ] && echo "rical_b64(rical)=$HAIP_RICAL_B64_EXPORTED" >> "$SEED_OUT"
 echo "attestation_issuer(vciatt)=${ATTESTATION_ISSUER:-https://vci-attester.conformance-local}" >> "$SEED_OUT"
 emit_client() { # emit_client <name> <json>
   echo "client_id($1)=$(jget "$2" client_id)" | tee -a "$SEED_OUT"
