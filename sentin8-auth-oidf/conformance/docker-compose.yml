@@ -62,6 +62,11 @@ services:
       # 127.0.0.1 answer would pin the JVM to itself - "Network is
       # unreachable" with the IPv6 host-gateway form).
       - "auth.cert-fapi2.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-imp.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-hyb.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-fp.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-sm.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-vp.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.cert-f2m.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.cert-fapi1.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.cert-ciba.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"

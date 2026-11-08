@@ -230,6 +230,22 @@ case "$PROFILE" in
     FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_iss":true,"require_mtls":true,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_ciba)
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+  formpost)
+    # The Form Post OP profile (auth DESIGN 9a.25): the plain OIDC
+    # posture - the RESPONSE MODE (form_post) is the family's distinction,
+    # not a flag set. The env rides the same RS256 signing family as the
+    # standard family.
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+  sm_session)
+    # The Session-OP trio (auth DESIGN 9a.26): checks-session needs NO
+    # flags - the check_session_iframe + the backchannel fanout ride the
+    # handler paths.
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+  vp)
+    # The OID4VP verifier family (auth DESIGN 9a.27): the verifier
+    # requests ride the eudi_wallet connection + the issuance-chain x5c
+    # (the HAIP plan's trust anchor). The plain OIDC token posture.
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   vci)
     # OID4VCI issuer cells: the suite's vci profile drives PAR-pushed
     # authorization (the credential offer's pre-authorized codes ride the
@@ -419,7 +435,7 @@ PYHAIPPEM
   HAIP_LEAF_DER_B64_EXPORTED="$HAIP_LEAF_DER_B64"
   HAIP_ISSUER_XY_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kid'], d['x'], d['y'])")"
 fi
-ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
+PROFILE_PUT_OUT="$(ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"scope\":\"env\",
     \"org_id\":\"$ORG_ID\",
     \"env_id\":\"$ENV_ID\",
@@ -429,7 +445,12 @@ ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"signing_alg\":\"$ALG\",
     \"refresh_rotation\":$ROTATION
     $ATTESTATION_FIELDS
-  }" && log "profile=$PROFILE set ({$FLAGS}, $ALG, rotation=$ROTATION)"
+  }")"
+if [ -z "$PROFILE_PUT_OUT" ]; then
+  log "FATAL: the security-profile PUT FAILED for profile=$PROFILE env=$ENV_ID - fix the API error (the seed must never pass-1 silently: a missed profile row makes every module of the family run against the WRONG posture)"
+  exit 1
+fi
+log "profile=$PROFILE set ({$FLAGS}, $ALG, rotation=$ROTATION)"
 
 # ── 2c. TLS warm-up (runbook §5): the suite's Java client makes
 # single-shot fetches with a short socket timeout; a cold auth instance
@@ -501,7 +522,9 @@ dcr() { # dcr <name> <json-extra>
   parts+=("\"client_name\":\"$name\"")
   if [[ "$extra" != *'"redirect_uris"'* ]]; then parts+=("\"redirect_uris\":[\"$CALLBACK\"]"); fi
   if [[ "$extra" != *'"grant_types"'* ]]; then parts+=("\"grant_types\":[\"authorization_code\",\"refresh_token\"]"); fi
-  parts+=("\"response_types\":[\"code\"]")
+  # Same duplicate-field rule for response_types (the hybrid/formpost
+  # families register their own multi-type arrays).
+  if [[ "$extra" != *'"response_types"'* ]]; then parts+=("\"response_types\":[\"code\"]"); fi
   if [[ "$extra" != *'"scope"'* ]]; then parts+=("\"scope\":\"openid profile email phone address offline_access\""); fi
   parts+=("\"code_challenge_method\":\"S256\"")
   if [[ "$extra" != *'"consent_required"'* ]]; then parts+=("\"consent_required\":$CONSENT_REQUIRED"); fi
@@ -532,9 +555,22 @@ for c in items:
 " | while read -r cid; do
   [ -n "$cid" ] && ccall auth DELETE "/v1/admin/oauth-clients/$cid" --env "$ENV_ID" >/dev/null
 done
-BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
-POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
-PKCE_JSON="$(dcr "cert-public-pkce" '"token_endpoint_auth_method":"none"')"
+# The family's response_types: the standard families certify `code`;
+# the implicit/hybrid/formpost families' clients register the FULL
+# OIDC Core matrix (OIDC Core 3.1.2.1 - the authorize endpoint rejects
+# an unregistered response_type; the suite's implicit cells request
+# id_token / id_token token and the hybrid cells request
+# code id_token / code token / code id_token token against the SAME
+# static client, and the formpost plan family re-uses the same cells
+# under the form_post response mode).
+HYBRID_RESPONSE_TYPES='\"response_types\":[\"code\",\"code id_token\",\"code token\",\"code id_token token\",\"id_token\",\"id_token token\"]'
+case "$PROFILE" in
+  implicit|hybrid|formpost) : ;;
+  *) HYBRID_RESPONSE_TYPES="\"response_types\":[\"code\"]" ;;
+esac
+BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+PKCE_JSON="$(dcr "cert-public-pkce" "\"token_endpoint_auth_method\":\"none\",$HYBRID_RESPONSE_TYPES")"
 
 # RFC 8628 device-flow client - the rotate-keys module's operator grant
 # (the platform key rotation - see runner.ts's device block). It rides a
@@ -553,20 +589,28 @@ DEVICE_JSON="$(dcr "cert-device" "\"grant_types\":[\"urn:ietf:params:oauth:grant
 # bc-authorize gate rejects the secret methods) - the client carries its
 # OWN EC P-256 key (the suite signs client assertions with the private
 # jwks; the assertion audience = the backchannel endpoint).
+#
+# CIBA client key = RSA-PS256 (the fapi2 cells' shape - auth DESIGN
+# 9a.16 (i)): the suite's FAPICIBAID1 RS256-negative modules gate on
+# keys[0].alg == 'PS256' of the plan config's client.jwks (suite source
+# JWKUtil.getAlgFromClientJwks reads ONLY the first key), and the server
+# verifies RSA+PS256 assertions (verify_with_jwk's ('RSA','PS256') arm).
+# An EC/ES256 client key makes those two modules SKIP - the 9a.10 no-skip
+# rule treats every skip as failed coverage. A two-key jwks cannot serve
+# both families: the suite's signer errors on >1 signature-use key, and
+# FAPICheckKeyAlgInClientJWKs fails setup for any sig key without an alg.
+# CIBA ID1 emits NO DPoP proofs (plain_fapi pre-authorization is empty),
+# so the client key only signs request objects + client assertions.
 CIBA_KEYS="$(python3 - <<'PYGEN'
 import base64, json
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.asymmetric import rsa
 
-key = ec.generate_private_key(ec.SECP256R1())
-pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
-y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
-d = key.private_numbers().private_value.to_bytes(32, 'big')
-d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rn = key.public_key().public_numbers()
+def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
 kid = 'ciba-key'
-private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
-public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+private = {"kty": "RSA", "kid": kid, "n": _bn(rn.n), "e": _bn(rn.e), "d": _bn(key.private_numbers().d), "alg": "PS256"}
+public = {"keys": [{"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
 print(json.dumps({"private": private, "public": public}))
 PYGEN
 )"
@@ -588,6 +632,10 @@ echo "attestation_issuer(vciatt)=${ATTESTATION_ISSUER:-https://vci-attester.conf
 emit_client() { # emit_client <name> <json>
   echo "client_id($1)=$(jget "$2" client_id)" | tee -a "$SEED_OUT"
   echo "client_secret($1)=$(jget "$2" client_secret)" | tee -a "$SEED_OUT"
+  # RFC 7592 client-config token - the harness's registration
+  # surface for STATIC clients (the Back-Channel OP plan's
+  # backchannel_logout_uri PUT rides this; auth DESIGN 9a.26).
+  echo "registration_access_token($1)=$(jget "$2" registration_access_token)" | tee -a "$SEED_OUT"
 }
 # CIBA second client - the suite's AbstractFAPICIBAID1MultipleClient
 # family (signed-by-other-client / bad-iss / multiple hints) drives a
@@ -596,18 +644,14 @@ emit_client() { # emit_client <name> <json>
 # actually differ).
 CIBA2_KEYS="$(python3 - <<'PYGEN2'
 import base64, json
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.asymmetric import rsa
 
-key = ec.generate_private_key(ec.SECP256R1())
-pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-x = base64.urlsafe_b64encode(pub[1:33]).rstrip(b'=').decode()
-y = base64.urlsafe_b64encode(pub[33:65]).rstrip(b'=').decode()
-d = key.private_numbers().private_value.to_bytes(32, 'big')
-d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rn = key.public_key().public_numbers()
+def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
 kid = 'ciba2-key'
-private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256"}
-public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y}]}
+private = {"kty": "RSA", "kid": kid, "n": _bn(rn.n), "e": _bn(rn.e), "d": _bn(key.private_numbers().d), "alg": "PS256"}
+public = {"keys": [{"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
 print(json.dumps({"private": private, "public": public}))
 PYGEN2
 )"
