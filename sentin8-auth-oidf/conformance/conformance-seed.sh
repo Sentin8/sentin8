@@ -178,6 +178,10 @@ fi
 # GET /v1/e?org_id=... returns a top-level array of envs.
 ENV_ID="$(by_slug "$(ccall sys GET "/v1/e?org_id=$ORG_ID")" "$ENV_SLUG" id)"
 
+# The platform's SYSTEM env (sentin8-config SYSTEM_ENV_ID) - the realm
+# where the org-scoped groups live (sentin8:org:{org_id}:admins).
+SYSTEM_ENV_ID="00000000-0000-0000-0000-000000000002"
+
 if [ -z "$ENV_ID" ]; then
   log "creating env '$ENV_SLUG' in $ORG_SLUG"
   ENV_JSON="$(ccall sys POST /v1/e \
@@ -209,7 +213,7 @@ case "$PROFILE" in
   fapi_*) CONSENT_REQUIRED="true";;
 esac
 case "$PROFILE" in
-  fapi_2|fapi_2_message_signing|fapi_1_advanced|fapi_ciba|vci|vci_haip) ALG="ES256";;
+  fapi_2|fapi_2_message_signing|fapi_1_advanced|fapi_ciba|vci|vci_haip|vp) ALG="ES256";;
 esac
 log "setting env security profile to $PROFILE"
 # Per-profile flag posture (auth DESIGN §9a.5/§9a.3;): the flags
@@ -323,7 +327,11 @@ VCIATT_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(
 ATTESTATION_FIELDS=""
 ATTESTATION_FIELDS_BASE=""
 ATTESTATION_JSON_ANCHOR=""
-if [ "$PROFILE" == "vci_haip" ]; then
+if [ "$PROFILE" == "vci_haip" ] || [ "$PROFILE" == "vp" ]; then
+  # vci_haip: the attester block (DESIGN 9a.19) rides the profile row.
+  # vp: NO attestation fields - only the pass-1 PUT + issuance chain
+  # below run for the verifier family (DESIGN 9a.27).
+  if [ "$PROFILE" == "vci_haip" ]; then
   ATTESTATION_ANCHOR="$VCIATT_PEM"
   # The attester identity rides the ENV : env `cert` keeps the
   # legacy form (the specs' hardcoded constant); other envs suffix the
@@ -337,8 +345,11 @@ if [ "$PROFILE" == "vci_haip" ]; then
   ATTESTATION_JSON_ANCHOR="$(printf '%s' "$ATTESTATION_ANCHOR" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
   ATTESTATION_ISSUER_JSON="$(printf '%s' "$ATTESTATION_ISSUER" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
   ATTESTATION_FIELDS=",\"allow_client_attestation\":true,\"client_attestation_trust_anchor_pem\":$ATTESTATION_JSON_ANCHOR,\"client_attestation_issuer\":$ATTESTATION_ISSUER_JSON"
-  # Pass 1: PUT the vci_haip profile (no issuance material yet) so the
-  # cert-host JWKS resolves the ES256 family (the tenant-plane filter).
+  fi
+  # Pass 1: PUT the profile (no issuance material yet) so the
+  # cert-host JWKS resolves the ES256 family (the tenant-plane
+  # filter) - runs for vci_haip AND vp (the verifier request objects
+  # sign with the same tenant ES256 key the issuance leaf wraps).
   ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"scope\":\"env\",
     \"org_id\":\"$ORG_ID\",
@@ -414,7 +425,7 @@ PYGENHAIP
   # Fail loud (DESIGN §9a.5, seed step 2): report the state and let
   # the operator re-run the seed.
   if [ -z "$HAIP_LEAF_DER_B64" ]; then
-    log "FATAL: vci_haip issuance chain NOT built - no ES256 key in the JWKS at $CERT_AUTH_HOST (the pass-1 profile PUT must land first; a stale host-context cache may pin the tenant to the platform family - re-run the seed)"
+    log "FATAL: issuance chain NOT built for profile=$PROFILE - no ES256 key in the JWKS at $CERT_AUTH_HOST (the pass-1 profile PUT must land first; a stale host-context cache may pin the tenant to the platform family - re-run the seed)"
     exit 1
   fi
   HAIP_CA_PEM="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ca_pem'])")"
@@ -451,6 +462,45 @@ if [ -z "$PROFILE_PUT_OUT" ]; then
   exit 1
 fi
 log "profile=$PROFILE set ({$FLAGS}, $ALG, rotation=$ROTATION)"
+
+# ── 2b-vp. The OID4VP verifier connection (DESIGN 9a.27): the vp env
+# carries a `eudi_wallet` enterprise connection whose trusted-issuer
+# set = the SUITE's wallet (the conformance host's credential issuer).
+# The suite mints credentials signed with credential.signing_jwk (the
+# seed-out xy key) - our verifier accepts presentations from the
+# suite's wallet by trusting that issuer. The re-seed's issuance chain
+# is FRESH each run (a new CA) - the stale row is deleted so the new
+# anchor lands (the name-409 path would keep the old key forever).
+if [ "$PROFILE" == "vp" ] && [ -n "${HAIP_ISSUER_XY_EXPORTED:-}" ]; then
+  # The trust-entry issuer = the suite's TEST-INSTANCE base (the
+  # credential's `iss` - the suite mints credentials there). The
+  # spec's own registration refreshes this entry with the campaign's
+  # fresh wallet key (the seed's entry is the idempotent bootstrap).
+  WALLET_TRUST="$(printf '%s' "{\"issuer\":\"https://localhost.emobix.co.uk:8443/test/a/$ALIAS\",\"jwks\":{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"x\":\"$(echo "$HAIP_ISSUER_XY_EXPORTED" | cut -d' ' -f2)\",\"y\":\"$(echo "$HAIP_ISSUER_XY_EXPORTED" | cut -d' ' -f3)\"}]}}" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  CONN_LIST="$(ccall auth GET /v1/admin/enterprise-connections --env "$ENV_ID" 2>/dev/null || echo '[]')"
+  OLD_CONN_ID="$(echo "$CONN_LIST" | python3 -c "
+import json,sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+for r in rows if isinstance(rows, list) else []:
+    if r.get('strategy') == 'eudi_wallet':
+        print(r.get('id', ''))
+        break
+" 2>/dev/null)"
+  if [ -n "$OLD_CONN_ID" ]; then
+    ccall auth DELETE "/v1/admin/enterprise-connections/$OLD_CONN_ID" --env "$ENV_ID" >/dev/null 2>&1 || true
+    log "stale eudi_wallet connection removed (fresh issuance-chain anchor lands)"
+  fi
+  ccall auth POST /v1/admin/enterprise-connections --env "$ENV_ID" --body "{
+    \"name\":\"eudi-wallet-conformance\",
+    \"strategy\":\"eudi_wallet\",
+    \"status\":\"active\",
+    \"config\":{\"trusted_issuers\":[$WALLET_TRUST],\"min_level_of_assurance\":\"low\"}
+  }" >/dev/null || { log "FATAL: the eudi_wallet connection POST failed - the OID4VP verifier modules will 404 (auth DESIGN 9a.27: the request creator gates on the connection)"; exit 1; }
+  log "eudi_wallet connection ensured for the verifier family"
+fi
 
 # ── 2c. TLS warm-up (runbook §5): the suite's Java client makes
 # single-shot fetches with a short socket timeout; a cold auth instance
@@ -562,8 +612,11 @@ done
 # id_token / id_token token and the hybrid cells request
 # code id_token / code token / code id_token token against the SAME
 # static client, and the formpost plan family re-uses the same cells
-# under the form_post response mode).
-HYBRID_RESPONSE_TYPES='\"response_types\":[\"code\",\"code id_token\",\"code token\",\"code id_token token\",\"id_token\",\"id_token token\"]'
+# under the form_post response mode). Double-quoted with escapes: the
+# value embeds into the dcr extra's escaped-JSON context as literal
+# double quotes (a single-quoted \" would land backslashes in the
+# body and the DCR rejects the malformed JSON).
+HYBRID_RESPONSE_TYPES="\"response_types\":[\"code\",\"code id_token\",\"code token\",\"code id_token token\",\"id_token\",\"id_token token\"]"
 case "$PROFILE" in
   implicit|hybrid|formpost) : ;;
   *) HYBRID_RESPONSE_TYPES="\"response_types\":[\"code\"]" ;;
@@ -940,6 +993,29 @@ print(next((r.get('id','') for r in items if r.get('name')=='sentin8:auth:admin'
       || log "WARN: role grant failed (may already exist - continuing)"
   else
     log "WARN: sentin8:auth:admin role not found in the env - grant skipped"
+  fi
+  # The ORG-ADMINS group membership (the org-scoped access model):
+  # the admin API's cross-org probe (auth sentin8or_auth) checks the
+  # org groups `sentin8:org:{org_id}:admins` at SYSTEM_ENV_ID - a user
+  # with ONLY env roles fails the probe with 'not a member of this
+  # organization' (the OID4VP wallet-trust registration drives the
+  # admin API as the cert user). The group lives in the SYSTEM env -
+  # the lookup + grant target it (no direct SQL - the E2E rule).
+  ORG_ADMINS_GROUP_ID="$(ccall auth GET "/v1/admin/groups?page_size=200" --env "$SYSTEM_ENV_ID" | python3 -c "
+import json,sys
+try:
+    items=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = items.get('groups', items) if isinstance(items, dict) else items
+print(next((g.get('id','') for g in items if g.get('name')=='sentin8:org:$ORG_ID:admins'), ''))
+")"
+  if [ -n "$ORG_ADMINS_GROUP_ID" ]; then
+    ccall auth POST "/v1/admin/groups/$ORG_ADMINS_GROUP_ID/members" --env "$SYSTEM_ENV_ID" --body "{\"user_id\":\"$USER_ID\"}" >/dev/null \
+      && log "org-admins group membership granted to the cert user ($ORG_ADMINS_GROUP_ID -> $USER_ID)" \
+      || log "WARN: org-admins group grant failed (may already exist - continuing)"
+  else
+    log "WARN: the org-admins group sentin8:org:$ORG_ID:admins not found - the cert user's admin API access may be org-probe-gated"
   fi
 fi
 
