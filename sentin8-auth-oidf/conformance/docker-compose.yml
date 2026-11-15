@@ -72,6 +72,7 @@ services:
       - "auth.cert-ciba.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.cert-vci.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.cert-haip.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
+      - "auth.cert-fcl.conformance-local.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
       - "auth.ops.sys.local.sentin8.dev:${DOCKER_HOST_IPV4:-host-gateway}"
     environment:
       SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/conformance

@@ -245,6 +245,13 @@ case "$PROFILE" in
     # flags - the check_session_iframe + the backchannel fanout ride the
     # handler paths.
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+  fcl)
+    # The Front-Channel Logout OP family (auth DESIGN 9a.28): the plain
+    # OIDC posture - the FCL surface rides the client registration
+    # (frontchannel_logout_uri) + the logout-done iframes, not a flag
+    # set. The plan's discovery verification reads
+    # frontchannel_logout_supported/_session_supported (always true).
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   vp)
     # The OID4VP verifier family (auth DESIGN 9a.27): the verifier
     # requests ride the eudi_wallet connection + the issuance-chain x5c
@@ -893,7 +900,96 @@ PYGEN2
 CIBA2_PUB="$(echo "$CIBA2_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")"
 CIBA2_PRIV="$(echo "$CIBA2_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")"
 CIBA2_JSON="$(dcr "cert-ciba-2" "\"grant_types\":[\"urn:openid:params:grant-type:ciba\",\"refresh_token\"],\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$CIBA2_PUB,\"backchannel_client_notification_endpoint\":\"$CIBA_PING_URL\"")"
+
+# ── 3b2. CIBA MTLS client-auth clients (OIDF-ALL-1: the FAPI-CIBA OP
+# Poll/Ping w/ MTLS catalog cells) - self_signed_tls_client_auth (RFC
+# 8705 2.4, DESIGN 9a.12): the seed mints a SELF-SIGNED EC P-256 client
+# cert, registers the sha-256 thumbprint via DCR (with the client's
+# PS256 signing jwks - the CIBA request objects still sign with the
+# jwks key family), and publishes cert+key PEMs + base64(DER) forms to
+# seed-out (the plan config's mtls.* / mtls2.*).
+if [[ "$PROFILE" == "fapi_ciba" ]]; then
+  log "registering CIBA MTLS client-auth clients (self_signed_tls_client_auth)"
+  for cl in main second; do
+    export CIBA_MTLS_CL="$cl"
+    CIBAMTLS_JSON="$(python3 - <<"PYMTLS"
+import base64, hashlib, json
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.x509.oid import NameOID
+import datetime, os
+
+cn = 'cert-ciba-mtls' + ('' if os.environ.get('CIBA_MTLS_CL') == 'main' else '-2')
+key = ec.generate_private_key(ec.SECP256R1())
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+now = datetime.datetime.now(datetime.timezone.utc)
+cert = (x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .sign(key, hashes.SHA256()))
+der = cert.public_bytes(serialization.Encoding.DER)
+thumb = base64.urlsafe_b64encode(hashlib.sha256(der).digest()).rstrip(b'=').decode()
+# The client's signing key (request objects / client assertions under
+# the MTLS client-auth cell still sign with the PS256 jwks family):
+skey = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rn = skey.public_key().public_numbers()
+def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
+spriv = {"kty": "RSA", "kid": f"ciba-mtls-key{'-2' if os.environ.get('CIBA_MTLS_CL') != 'main' else ''}", "n": _bn(rn.n), "e": _bn(rn.e), "d": _bn(skey.private_numbers().d), "alg": "PS256"}
+spub = {"keys": [{"kty": "RSA", "kid": f"ciba-mtls-key{'-2' if os.environ.get('CIBA_MTLS_CL') != 'main' else ''}", "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
+print(json.dumps({
+    "thumbprint": thumb,
+    "cert_der_b64": base64.b64encode(der).decode(),
+    "cert_pem": cert.public_bytes(serialization.Encoding.PEM).decode(),
+    "key_pem": key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode(),
+    "signing_private": spriv,
+    "signing_public": spub,
+}))
+PYMTLS
+)"
+    if [ -z "$CIBAMTLS_JSON" ]; then
+      log "CIBA MTLS certgen failed for $cl - cell clients skipped"
+      break
+    fi
+    CIBA_MTLS_THUMB="$(echo "$CIBAMTLS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['thumbprint'])")"
+    CIBA_MTLS_CERTB64="$(echo "$CIBAMTLS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['cert_der_b64'])")"
+    CIBA_MTLS_CERTPEM="$(echo "$CIBAMTLS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['cert_pem'])")"
+    CIBA_MTLS_KEYPEM="$(echo "$CIBAMTLS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['key_pem'])")"
+    CIBA_MTLS_SJWKS_PUB="$(echo "$CIBAMTLS_JSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['signing_public']))")"
+    CIBA_MTLS_SJWKS_PRIV="$(echo "$CIBAMTLS_JSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['signing_private']))")"
+    CIBA_MTLS_CN="cert-ciba-mtls"
+    [ "$cl" = second ] && CIBA_MTLS_CN="cert-ciba-mtls-2"
+    MTLS_CIBA_JSON="$(dcr "$CIBA_MTLS_CN" "\"grant_types\":[\"urn:openid:params:grant-type:ciba\",\"refresh_token\"],\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$CIBA_MTLS_THUMB\",\"jwks\":$CIBA_MTLS_SJWKS_PUB,\"backchannel_client_notification_endpoint\":\"$CIBA_PING_URL\"")"
+    emit_client "ciba-mtls-$cl" "$MTLS_CIBA_JSON"
+    echo "private_jwks(ciba-mtls-$cl)=$CIBA_MTLS_SJWKS_PRIV" >> "$SEED_OUT"
+    echo "ciba_mtls_cert_der_b64($cl)=$CIBA_MTLS_CERTB64" >> "$SEED_OUT"
+    # The PEMs ride seed-out with their own lines (single-line values;
+    # the trailing END marker is part of the value):
+    { echo "ciba_mtls_cert_pem($cl)=$CIBA_MTLS_CERTPEM"; } >> "$SEED_OUT"
+    { echo "ciba_mtls_key_pem($cl)=$CIBA_MTLS_KEYPEM"; } >> "$SEED_OUT"
+    # Also publish under the generic main/second names the FAPI1/FAPI2
+    # mtls sections read (cert-cert reuse across the families):
+    [ "$cl" = main ] && { echo "mtls_cert_der_b64(main)=$CIBA_MTLS_CERTB64" >> "$SEED_OUT"; { echo "mtls_key_pem(main)=$CIBA_MTLS_KEYPEM"; } >> "$SEED_OUT"; }
+    [ "$cl" = second ] && { echo "mtls_cert_der_b64(second)=$CIBA_MTLS_CERTB64" >> "$SEED_OUT"; { echo "mtls_key_pem(second)=$CIBA_MTLS_KEYPEM"; } >> "$SEED_OUT"; }
+  done
+fi
 emit_client basic "$BASIC_JSON"
+
+# ── Front-Channel Logout OP client (auth DESIGN 9a.28) ──
+# The FCL plan's static-client rule (the suite module's own description):
+# frontchannel_logout_uri = the redirect URL with the portion after the
+# alias replaced by /frontchannel_logout, and /post_logout_redirect
+# registered as a post_logout_redirect_uri. No query string (FCL 2).
+if [[ "$PROFILE" == "fcl" ]]; then
+  log "registering the FCL client (frontchannel_logout_uri + session required)"
+  FCL_LOGOUT_URI="${CALLBACK%/callback}/frontchannel_logout"
+  FCL_JSON="$(dcr "cert-fcl" "\"token_endpoint_auth_method\":\"client_secret_basic\",\"redirect_uris\":[\"$CALLBACK\"],\"frontchannel_logout_uri\":\"$FCL_LOGOUT_URI\",\"frontchannel_logout_session_required\":true,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+  emit_client fcl "$FCL_JSON"
+fi
 emit_client post "$POSTC_JSON"
 emit_client pkce "$PKCE_JSON"
 emit_client ciba "$CIBA_JSON"
@@ -962,8 +1058,11 @@ if [[ "$PROFILE" == fapi_* ]]; then
   log "registering FAPI2 static clients (private_key_jwt + jwks)"
   # The mtls cell's client auth is the CERTIFICATE (self_signed, DESIGN
   # 9a.12) - registered separately below; the jwks loop covers the
-  # private_key_jwt cells.
-  for cell in dpop; do
+  # private_key_jwt cells: BOTH sender-constrain cells (dpop + the
+  # mtls-sender-constrained private_key cell, OIDF-ALL-1 - the FAPI2
+  # mtls+dpop cross cells + the FAPI1 pk/mtls client-auth cells read
+  # the SAME per-cell jwks clients).
+  for cell in dpop mtls-pk; do
     for cl in main second; do
       KEYJSON="$(python3 - <<'PYGEN'
 import base64, json
