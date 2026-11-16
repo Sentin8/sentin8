@@ -224,14 +224,29 @@ case "$PROFILE" in
   standard)
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_2)
-    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    # FAPI2-SP 5.3.2.1-6: a sender-constraining credential is required -
+    # WHICH one (DPoP vs mTLS) is the suite's per-cell sender_constrain
+    # axis, NOT an env-wide posture. The env does NOT blanket-demand DPoP;
+    # the dpop cells register sender_constrain=dpop clients (OC-38, the
+    # per-registration gate) and the mtls cells register sender_constrain=mtls.
+    # require_pkce=true: FAPI2-SP mandates PKCE unconditionally on the
+    # authorization request (OC-38 - the REAL column, not require_par's
+    # mirror).
+    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_pkce":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_2_message_signing)
     # The FINAL msg-signing plan's "request signing" = SIGNED REQUEST OBJECTS
     # (JAR signed_non_repudiation) - the happy flow's token POST is PLAIN;
     # no RFC 9421 HTTP-message-signature or introspection posture.
-    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    # The sender-constraining credential is per-cell (see the fapi_2 note);
+    # require_pkce=true (FAPI2 mandates PKCE, OC-38).
+    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_pkce":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_1_advanced)
-    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_iss":true,"require_mtls":true,"require_http_signatures":false,"require_jwt_introspection":false';;
+    # OC-38: require_pkce=false - FAPI1-ADV Part 2 5.2.2-18 requires
+    # PKCE only on the PAR transport (the NOTE explicitly declines to
+    # require it elsewhere for backwards compatibility); the by-value
+    # request-object cells carry no challenge and MUST NOT 400. The
+    # pushed cells keep the PAR-transport PKCE mandate (5.2.2-18).
+    FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_pkce":false,"require_iss":true,"require_mtls":true,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_ciba)
     FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   formpost)
@@ -1090,8 +1105,19 @@ PYGEN
       fi
       PRIVJWKS="$(echo "$KEYJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")"
       PUBJWKS="$(echo "$KEYJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")"
+      # FAPI2-SP 5.3.2.1-6 (per-cell, OC-38): the dpop cell's clients
+      # register sender_constrain=dpop (with dpop_bound as the DPoPRS-2
+      # registration view) - the sender-constraining credential for this
+      # cell is DPoP, and the per-registration gate demands a live proof
+      # at every token request (the env's require_dpop stays OFF: the
+      # mtls cells present certs). The pk (private_key_jwt) cell's
+      # DEFAULT posture is any - the profile gate governs.
+      DPOP_FLAG=''
+      if [ "$cell" = dpop ]; then
+        DPOP_FLAG=',"dpop_bound":true,"sender_constrain":"dpop"'
+      fi
       if [ "$cl" = main ]; then
-        FJSON="$(dcr "cert-fapi2-$cell" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS")"
+        FJSON="$(dcr "cert-fapi2-$cell" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS$DPOP_FLAG")"
         emit_client "fapi2-$cell" "$FJSON"
         echo "private_jwks(fapi2-$cell)=$PRIVJWKS" >> "$SEED_OUT"
       else
@@ -1104,7 +1130,7 @@ PYGEN
         # match per entry; the dummy preserves the happy-flow
         # verbatim requirement, the plain callback is the negative's
         # error target).
-        FJSON2="$(dcr "cert-fapi2-$cell-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
+        FJSON2="$(dcr "cert-fapi2-$cell-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS$DPOP_FLAG,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
         emit_client "fapi2-second-$cell" "$FJSON2"
         echo "private_jwks(fapi2-second-$cell)=$PRIVJWKS" >> "$SEED_OUT"
       fi
@@ -1189,11 +1215,23 @@ PYMTLS
     PRIVJWKS="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private_jwks']))")"
     PUBJWKS="$(echo "$CERTJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public_jwks']))")"
     if [ "$cl" = main ]; then
-      MJSON="$(dcr "cert-fapi2-mtls" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS")"
+      MJSON="$(dcr "cert-fapi2-mtls" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS,\"sender_constrain\":\"mtls\"")"
       emit_client "fapi2-mtls" "$MJSON"
     else
       MJSON2="$(dcr "cert-fapi2-mtls-2" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
       emit_client "fapi2-second-mtls" "$MJSON2"
+    fi
+    if [ "$cl" = main ]; then
+      # The mtls/dpop CROSS cell (DPoPRS-2, auth DESIGN 9a.22): a
+      # DEDICATED self_signed_tls_client_auth client whose tokens are
+      # DPoP-constrained (sender_constrain=dpop + the dpop_bound view,
+      # OC-38) - the suite's ensure-holder-of-key-required negative
+      # keeps this cert, drops the DPoP proof, and reads the 4xx; the
+      # plain mtls cell (sender_constrain=mtls - the cert IS the
+      # constraint) keeps its happy path. Same cert material (the cert
+      # authenticates; the registration discriminates).
+      XDJSON="$(dcr "cert-fapi2-mtls-dpop" "\"token_endpoint_auth_method\":\"self_signed_tls_client_auth\",\"self_signed_tls_client_auth_thumbprint\":\"$THUMB\",\"jwks\":$PUBJWKS,\"dpop_bound\":true,\"sender_constrain\":\"dpop\"")"
+      emit_client "fapi2-mtls-dpop" "$XDJSON"
     fi
     echo "mtls_cert_pem($cl)=$CERT_PEM" >> "$SEED_OUT"
     echo "mtls_key_pem($cl)=$KEY_PEM" >> "$SEED_OUT"
