@@ -222,7 +222,7 @@ log "setting env security profile to $PROFILE"
 # postures turn on exactly what their certification profile mandates.
 case "$PROFILE" in
   standard)
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_2)
     # FAPI2-SP 5.3.2.1-6: a sender-constraining credential is required -
     # WHICH one (DPoP vs mTLS) is the suite's per-cell sender_constrain
@@ -248,37 +248,39 @@ case "$PROFILE" in
     # pushed cells keep the PAR-transport PKCE mandate (5.2.2-18).
     FLAGS='"require_par":true,"require_jarm":true,"require_dpop":false,"require_pkce":false,"require_iss":true,"require_mtls":true,"require_http_signatures":false,"require_jwt_introspection":false';;
   fapi_ciba)
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   formpost)
     # The Form Post OP profile (auth DESIGN 9a.25): the plain OIDC
     # posture - the RESPONSE MODE (form_post) is the family's distinction,
     # not a flag set. The env rides the same RS256 signing family as the
     # standard family.
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   sm_session)
     # The Session-OP trio (auth DESIGN 9a.26): checks-session needs NO
     # flags - the check_session_iframe + the backchannel fanout ride the
     # handler paths.
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   fcl)
     # The Front-Channel Logout OP family (auth DESIGN 9a.28): the plain
     # OIDC posture - the FCL surface rides the client registration
     # (frontchannel_logout_uri) + the logout-done iframes, not a flag
     # set. The plan's discovery verification reads
     # frontchannel_logout_supported/_session_supported (always true).
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   vp)
     # The OID4VP verifier family (auth DESIGN 9a.27): the verifier
     # requests ride the eudi_wallet connection + the issuance-chain x5c
     # (the HAIP plan's trust anchor). The plain OIDC token posture.
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   vci)
     # OID4VCI issuer cells: the suite's vci profile drives PAR-pushed
     # authorization (the credential offer's pre-authorized codes ride the
     # pushed flow); no JARM (the code response stays plain - the suite
     # parses a standard code redirect), no mTLS (private_key_jwt +
-    # dpop-only sender constraint).
-    FLAGS='"require_par":true,"require_jarm":false,"require_dpop":false,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    # dpop-only sender constraint). The issuance code flow carries an
+    # S256 challenge end-to-end (auth DESIGN 9a.22 - the rig
+    # require_pkce table).
+    FLAGS='"require_par":true,"require_jarm":false,"require_dpop":false,"require_pkce":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   vci_haip)
     # OID4VCI HAIP cells: the vci posture PLUS attestation-based client
     # authentication (draft-ietf-oauth-attestation-based-client-auth;
@@ -287,10 +289,12 @@ case "$PROFILE" in
     # enforces it server-side, auth DESIGN §9a.22). The allow flag + the
     # trust anchor (the attester's self-signed leaf PEM) + the expected
     # attestation iss ride the profile row - discovery then advertises
-    # attest_jwt_client_auth and the attestation alg lists.
-    FLAGS='"require_par":true,"require_jarm":false,"require_dpop":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    # attest_jwt_client_auth and the attestation alg lists. The issuance
+    # code flow carries an S256 challenge end-to-end (auth DESIGN 9a.22 -
+    # the rig require_pkce table).
+    FLAGS='"require_par":true,"require_jarm":false,"require_dpop":true,"require_pkce":true,"require_iss":true,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
   *)
-    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
+    FLAGS='"require_par":false,"require_jarm":false,"require_dpop":false,"require_pkce":false,"require_iss":false,"require_mtls":false,"require_http_signatures":false,"require_jwt_introspection":false';;
 esac
 # FAPI 2.0 Security Profile (final) 5.3.2.1-9: refresh rotation PROHIBITED - the
 # suite's refresh-token module re-runs the PREVIOUS refresh token and expects it
@@ -372,13 +376,15 @@ if [ "$PROFILE" == "vci_haip" ] || [ "$PROFILE" == "vp" ]; then
   # cert-host JWKS resolves the ES256 family (the tenant-plane
   # filter) - runs for vci_haip AND vp (the verifier request objects
   # sign with the same tenant ES256 key the issuance leaf wraps).
+  # No post-FLAGS require_pkce override - a JSON
+  # later-key-wins line would defeat the per-family posture the
+  # FLAGS encode.
   ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"scope\":\"env\",
     \"org_id\":\"$ORG_ID\",
     \"env_id\":\"$ENV_ID\",
     \"profile\":\"$PROFILE\",
     $FLAGS,
-    \"require_pkce\":true,
     \"signing_alg\":\"$ALG\",
     \"refresh_rotation\":$ROTATION
     $ATTESTATION_FIELDS_BASE
@@ -653,7 +659,6 @@ PROFILE_PUT_OUT="$(ccall auth PUT /v1/security-profile --env "$ENV_ID" --body "{
     \"env_id\":\"$ENV_ID\",
     \"profile\":\"$PROFILE\",
     $FLAGS,
-    \"require_pkce\":true,
     \"signing_alg\":\"$ALG\",
     \"refresh_rotation\":$ROTATION
     $ATTESTATION_FIELDS
@@ -1110,14 +1115,23 @@ PYGEN
       # registration view) - the sender-constraining credential for this
       # cell is DPoP, and the per-registration gate demands a live proof
       # at every token request (the env's require_dpop stays OFF: the
-      # mtls cells present certs). The pk (private_key_jwt) cell's
-      # DEFAULT posture is any - the profile gate governs.
+      # mtls cells present certs). The mtls-pk cell's clients register
+      # sender_constrain=mtls (auth DESIGN 9a.22 - the
+      # registration-to-cell mapping): the pk cell's sender
+      # credential is the CERTIFICATE (private_key_jwt auth, cert-bound
+      # token) - the gate demands it at the exchange and the
+      # ensure-holder-of-key-required negative (cert AND proof both
+      # stripped) reads the 4xx.
       DPOP_FLAG=''
+      MTLS_PK_FLAG=''
       if [ "$cell" = dpop ]; then
         DPOP_FLAG=',"dpop_bound":true,"sender_constrain":"dpop"'
       fi
+      if [ "$cell" = mtls-pk ]; then
+        MTLS_PK_FLAG=',"sender_constrain":"mtls"'
+      fi
       if [ "$cl" = main ]; then
-        FJSON="$(dcr "cert-fapi2-$cell" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS$DPOP_FLAG")"
+        FJSON="$(dcr "cert-fapi2-$cell" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS$DPOP_FLAG$MTLS_PK_FLAG")"
         emit_client "fapi2-$cell" "$FJSON"
         echo "private_jwks(fapi2-$cell)=$PRIVJWKS" >> "$SEED_OUT"
       else
@@ -1130,11 +1144,57 @@ PYGEN
         # match per entry; the dummy preserves the happy-flow
         # verbatim requirement, the plain callback is the negative's
         # error target).
-        FJSON2="$(dcr "cert-fapi2-$cell-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS$DPOP_FLAG,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
+        FJSON2="$(dcr "cert-fapi2-$cell-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS$DPOP_FLAG$MTLS_PK_FLAG,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
         emit_client "fapi2-second-$cell" "$FJSON2"
         echo "private_jwks(fapi2-second-$cell)=$PRIVJWKS" >> "$SEED_OUT"
       fi
     done
+  done
+fi
+
+# ── 3c-bis. FAPI1 pk-cell clients (auth DESIGN 9a.22 - the
+# registration-to-cell mapping) ──
+# The registration-to-cell mapping is EXCLUSIVE per flow shape: the
+# FAPI1-ADV private_key_jwt cells authenticate by assertion and NEVER
+# present a client certificate (plain token POST on the mtls alias),
+# so they ride NEITHER the dpop registration (the gate would demand a
+# proof no FAPI1 plan sends) NOR the mtls-sender registration (the
+# gate would demand the cert the flow never presents - the battery-10
+# `client certificate required` happy-flow reject). The fapi1-pk
+# family carries sender_constrain=any - the profile gate governs -
+# with the same RSA-PS256 jwks shape (the request-object signing
+# family + the suite's RS256-re-sign negatives need the PS256 key).
+if [[ "$PROFILE" == fapi_1_advanced ]]; then
+  log "registering FAPI1 pk clients (private_key_jwt + jwks, sender_constrain=any)"
+  for cl in main second; do
+    KEYJSON="$(python3 - <<'PYGEN1PK'
+import base64, json
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rn = key.public_key().public_numbers()
+def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
+kid = 'fapi1-pk-key'
+private = {"kty": "RSA", "kid": kid, "n": _bn(rn.n), "e": _bn(rn.e), "d": _bn(key.private_numbers().d), "alg": "PS256"}
+public = {"keys": [{"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
+print(json.dumps({"private": private, "public": public}))
+PYGEN1PK
+)"
+    if [ -z "$KEYJSON" ]; then
+      log "keygen failed for fapi1-pk/$cl - FAPI1 pk clients skipped"
+      break
+    fi
+    PRIVJWKS="$(echo "$KEYJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")"
+    PUBJWKS="$(echo "$KEYJSON" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")"
+    if [ "$cl" = main ]; then
+      FJSON="$(dcr "cert-fapi1-pk" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS")"
+      emit_client "fapi1-pk" "$FJSON"
+      echo "private_jwks(fapi1-pk)=$PRIVJWKS" >> "$SEED_OUT"
+    else
+      FJSON2="$(dcr "cert-fapi1-pk-2" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$PUBJWKS,\"redirect_uris\":[\"$CALLBACK?dummy1=lorem&dummy2=ipsum\",\"$CALLBACK\"]")"
+      emit_client "fapi1-second-pk" "$FJSON2"
+      echo "private_jwks(fapi1-second-pk)=$PRIVJWKS" >> "$SEED_OUT"
+    fi
   done
 fi
 
