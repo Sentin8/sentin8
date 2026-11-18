@@ -340,9 +340,25 @@ x5c = [base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()]
 leaf_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
 private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256", "x5c": x5c}
 public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y, "x5c": x5c}]}
-print(json.dumps({"private": private, "public": public, "leaf_pem": leaf_pem}))
+from cryptography.hazmat.primitives.serialization import PrivateFormat, NoEncryption
+priv_pem = key.private_bytes(
+    serialization.Encoding.PEM,
+    PrivateFormat.PKCS8,
+    NoEncryption(),
+).decode()
+print(json.dumps({"private": private, "public": public, "leaf_pem": leaf_pem, "priv_pem": priv_pem, "x5c": x5c}))
 PYGENVCIATT
 )"
+VCIATT_KEY_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('priv_pem','').strip())")
+VCIATT_X5C=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('x5c',[])))")
+# Single-line forms for the seed-out + the campaign env (a PEM's
+# newlines break the env contract): the base64-DER key + the base64
+# leaf (the holder's identity endpoint decodes both forms).
+VCIATT_KEY_DER_B64=$(echo "$VCIATT_KEYS" | python3 -c "
+import json,sys,base64
+pem=json.load(sys.stdin).get('priv_pem','')
+der=''.join(l for l in pem.splitlines() if '-----' not in l).strip()
+print(base64.b64encode(base64.b64decode(der)).decode())")
 VCIATT_PRIV=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")
 VCIATT_PUB=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")
 VCIATT_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('leaf_pem','').rstrip())")
@@ -353,7 +369,7 @@ VCIATT_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(
 ATTESTATION_FIELDS=""
 ATTESTATION_FIELDS_BASE=""
 ATTESTATION_JSON_ANCHOR=""
-if [ "$PROFILE" == "vci_haip" ] || [ "$PROFILE" == "vp" ]; then
+if [ "$PROFILE" == "vci_haip" ] || [ "$PROFILE" == "vp" ] || [ "$PROFILE" == "vci" ]; then
   # vci_haip: the attester block (DESIGN 9a.19) rides the profile row.
   # vp: NO attestation fields - only the pass-1 PUT + issuance chain
   # below run for the verifier family (DESIGN 9a.27).
@@ -420,9 +436,20 @@ if pub is None:
     sys.exit(0)
 x = int.from_bytes(base64.urlsafe_b64decode(pub["x"] + "=="), "big")
 y = int.from_bytes(base64.urlsafe_b64decode(pub["y"] + "=="), "big")
-pk = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1()).public_key()
+pub = {"kid": pub["kid"], "x": pub["x"], "y": pub["y"]} if pub else None
+# The mock issuer's credential-signing key: a FRESH P-256 pair minted
+# whole (RFC 7517 'd' + the leaf cert) - jwks.json's key is OUR auth's
+# token-signing identity (public there by design); the SUITE plays the
+# ISSUER and signs with credential.signing_jwk, whose private d only
+# exists if the mint owns it. Minting fresh ties the x5c leaf to
+# exactly the key the suite holds privately - one issuance identity.
+sign_key = ec.generate_private_key(ec.SECP256R1())
+pk = sign_key
+x = sign_key.public_key().public_numbers().x
+y = sign_key.public_key().public_numbers().y
 x_b64 = base64.urlsafe_b64encode(x.to_bytes(32, "big")).rstrip(b"=").decode()
 y_b64 = base64.urlsafe_b64encode(y.to_bytes(32, "big")).rstrip(b"=").decode()
+kid_mint = "haip-mint-" + x_b64[:8]
 
 ca_key = ec.generate_private_key(ec.SECP256R1())
 now = datetime.datetime.now(datetime.timezone.utc)
@@ -447,7 +474,7 @@ ca_ski = ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value.
 leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_url)])
 leaf = (x509.CertificateBuilder()
         .subject_name(leaf_name).issuer_name(ca_name)
-        .public_key(pk)
+        .public_key(sign_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=3650))
@@ -460,7 +487,7 @@ leaf = (x509.CertificateBuilder()
             content_commitment=False, data_encipherment=False,
             encipher_only=False, decipher_only=False,
             key_agreement=False, key_encipherment=False), critical=True)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(pk), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(sign_key.public_key()), critical=False)
         .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
             x509.SubjectKeyIdentifier(ca_ski)), critical=False)
         .sign(ca_key, hashes.SHA256()))
@@ -608,12 +635,20 @@ cose_sign1 = cbor_array([
 ])
 rical_b64 = base64.b64encode(cose_sign1).decode()
 
+# The private half (RFC 7517 'd'): the mint key signs the SUITE's
+# SD-JWT credentials (CreateSdJwtCredential demands private material,
+# DefaultJWSSignerFactory expectedPrivate) and the leaf cert wraps the
+# SAME pub - one issuance identity key, minted whole.
+d_b64 = base64.urlsafe_b64encode(
+    pk.private_numbers().private_value.to_bytes(32, "big")
+).rstrip(b"=").decode()
 print(json.dumps({
   "leaf_der_b64": base64.b64encode(leaf.public_bytes(serialization.Encoding.DER)).decode(),
   "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
   "x": x_b64,
   "y": y_b64,
-  "kid": pub["kid"],
+  "kid": kid_mint,
+  "d": d_b64,
   "rical_b64": rical_b64,
 }))
 PYGENHAIP
@@ -648,6 +683,12 @@ PYHAIPPEM
   HAIP_CA_PEM_EXPORTED="$HAIP_CA_PEM"
   HAIP_LEAF_DER_B64_EXPORTED="$HAIP_LEAF_DER_B64"
   HAIP_ISSUER_XY_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kid'], d['x'], d['y'])")"
+  # The PRIVATE issuance JWK (with d) - the suite's SD-JWT mint signs
+  # with it (the leaf x5c wraps the same pub, one identity key).
+  HAIP_ISSUER_PRIV_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "
+import json,sys
+j=json.load(sys.stdin)
+print(json.dumps({'kty':'EC','crv':'P-256','alg':'ES256','use':'sig','kid':j['kid'],'x':j['x'],'y':j['y'],'d':j['d']},separators=(',',':')))")"
   # The RICAL (Annex F.3.2) - std-base64 COSE_Sign1. The spec pins it
   # as client.rical (the suite's RegisterRical reads it from the
   # Client section; base64-decoded to bytes).
@@ -887,6 +928,7 @@ echo "attester_pem(vciatt)=$VCIATT_PEM" >> "$SEED_OUT"
 [ -n "${HAIP_CA_PEM_EXPORTED:-}" ] && echo "haip_issuer_ca_pem(haip)=$HAIP_CA_PEM_EXPORTED" >> "$SEED_OUT"
 [ -n "${HAIP_LEAF_DER_B64_EXPORTED:-}" ] && echo "haip_issuer_leaf_der_b64(haip)=$HAIP_LEAF_DER_B64_EXPORTED" >> "$SEED_OUT"
 [ -n "${HAIP_ISSUER_XY_EXPORTED:-}" ] && echo "haip_issuer_xy(haip)=$HAIP_ISSUER_XY_EXPORTED" >> "$SEED_OUT"
+[ -n "${HAIP_ISSUER_PRIV_EXPORTED:-}" ] && echo "haip_issuer_priv(haip)=$HAIP_ISSUER_PRIV_EXPORTED" >> "$SEED_OUT"
 # The RICAL rides the seed-out as ONE std-base64 line (the COSE_Sign1
 # bytes - no newlines; the spec regex reads it whole).
 [ -n "${HAIP_RICAL_B64_EXPORTED:-}" ] && echo "rical_b64(rical)=$HAIP_RICAL_B64_EXPORTED" >> "$SEED_OUT"
@@ -1410,5 +1452,76 @@ CONFORMANCE_ORG_ID=$ORG_ID
 CONFORMANCE_ENV_ID=$ENV_ID
 EOF
 chmod 600 "$CERT_USER_ENV"
+# The WALCERT-1 wallet campaign's env block: the holder SUT identity,
+# appended when the holder answers its health probe (the campaign runs
+# only with a live holder; a re-seed keeps the block - the heredoc above
+# REWRITES the file, so the block must follow every write, not live as a
+# manual append the next seed would wipe).
+HOLDERSVC_HOST="https://wallet8-holder.ops.sys.local.sentin8.dev"
+if curl -sk --max-time 5 "$HOLDERSVC_HOST/v1/health" 2>/dev/null | grep -aq "ok"; then
+  # The holder's device key derivation mirrors holder server.rs (the
+  # dev-tree data key + the user id): the plan config's client.jwks
+  # MUST carry exactly the JWK the holder signs its PAR/token calls
+  # with (the suite validates the client_assertion jwk against the
+  # registered set) - one derivation, two readers.
+  WALCERT_JWKS="$(export WALCERT_USER_ID="$USER_ID"; python3 <<'PYWJK'
+import hashlib, json, base64, os
+uid = os.environ["WALCERT_USER_ID"]
+seed = hashlib.sha256(b"wallet8-holder:dev-data-key").hexdigest()
+material = f"{seed}:{uid}".encode()
+priv = hashlib.sha256(material).digest()
+# The P-256 public point from the scalar (crypto: priv * G). Pure-python
+# EC math (no external deps in the seed).
+P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+A = P - 3
+B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+Gx = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
+Gy = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+def add(p, q):
+    if p is None: return q
+    if q is None: return p
+    if p[0] == q[0] and (p[1] + q[1]) % P == 0: return None
+    if p == q:
+        l = (3 * p[0] * p[0] + A) * pow(2 * p[1], P - 2, P) % P
+    else:
+        l = (q[1] - p[1]) * pow(q[0] - p[0], P - 2, P) % P
+    xr = (l * l - p[0] - q[0]) % P
+    yr = (l * (p[0] - xr) - p[1]) % P
+    return (xr, yr)
+def mul(k, pt):
+    r = None
+    while k:
+        if k & 1: r = add(r, pt)
+        pt = add(pt, pt)
+        k >>= 1
+    return r
+d = int.from_bytes(priv, 'big') % N
+Q = mul(d, (Gx, Gy))
+b64 = lambda n: base64.urlsafe_b64encode(n.to_bytes(32, 'big')).rstrip(b'=').decode()
+jwk = {'kty': 'EC', 'kid': 'wallet8-holder-key', 'crv': 'P-256', 'x': b64(Q[0]), 'y': b64(Q[1]), 'alg': 'ES256', 'use': 'sig'}
+print(json.dumps({'keys': [jwk]}, separators=(',', ':')))
+PYWJK
+)"
+  # The wallet's client-attestation identity (the HAIP client_attestation
+  # cells): the ATTESTER's key + its x5c chain (+ the issuer id) - the
+  # seed's own vciatt mint (private_jwks(vciatt) + attester_pem) is the
+  # trust domain, so the holder's attestations verify against the profile
+  # row's client_attestation_trust_anchor_pem. The PKCS#8 PEM form comes
+  # from the mint (attester_key_pem line).
+  cat >> "$CERT_USER_ENV" <<WALCEOF
+WALCERT_HOLDER_URL=$HOLDERSVC_HOST
+WALCERT_HOLDER_USER_ID=$USER_ID
+WALCERT_CLIENT_ID=wallet8-holder
+WALCERT_CLIENT_JWKS='$WALCERT_JWKS'
+WALCERT_ATTESTATION_KEY_DER_B64='$VCIATT_KEY_DER_B64'
+WALCERT_ATTESTATION_X5C='$VCIATT_X5C'
+WALCERT_ATTESTATION_ISSUER=${WALCERT_ATTESTATION_ISSUER:-https://vci-attester-$ENV_SLUG.conformance-local}
+WALCERT_ATTESTATION_ANCHOR_PEM='$VCIATT_PEM'
+WALCEOF
+  log "wallet campaign env appended (holder reachable, holder key derived for $USER_ID)"
+else
+  log "holder not reachable - wallet campaign env SKIPPED (the battery's wallet spec degrades to the issuer-side form)"
+fi
 log "wrote $CERT_USER_ENV"
 log "next: open https://localhost.emobix.co.uk:8443/ and create the test plans (runbook §4)"
