@@ -25,3 +25,6 @@
 
 # Local org-repo clone (never commit)
 /.github/
+
+# RIGMODE-1 generated rig domain mode file - never commit.
+conformance/domain.env

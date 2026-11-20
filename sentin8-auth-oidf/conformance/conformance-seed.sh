@@ -56,7 +56,24 @@ fi
 ALIAS="${CONFORMANCE_ALIAS:-sentin8-local}"
 ENV_SLUG="${CONFORMANCE_ENV_SLUG:-cert}"
 ORG_SLUG="conformance-local"
-DOMAIN_SUFFIX="local.sentin8.dev"
+# The domain rides the RIG MODE (auth DESIGN 9a.2 item 2c): the mode file
+# (conformance/domain.env, written by make conformance-domain-*) wins,
+# then the tree-root .env's SENTIN8_DOMAIN - a hardcoded suffix would pin
+# the campaign to the loopback zone.
+TREE_ROOT="$(cd "$ROOT/.." && pwd)"
+# The mode file: the GROUP root's conformance/domain.env (where the make
+# targets write), then an in-repo copy, then the tree-root .env.
+for MODE_FILE in "$ROOT/conformance/domain.env" "$(dirname "$0")/domain.env"; do
+  if [ -n "${DOMAIN_SUFFIX:-}" ]; then break; fi
+  if [ -f "$MODE_FILE" ]; then
+    DOMAIN_SUFFIX="$(grep -m1 '^SENTIN8_DOMAIN=' "$MODE_FILE" | cut -d= -f2 | tr -d '"' | tr -d ' ')"
+  fi
+done
+if [ -z "$DOMAIN_SUFFIX" ] && [ -f "$TREE_ROOT/.env" ]; then
+  DOMAIN_SUFFIX="$(grep -m1 '^SENTIN8_DOMAIN=' "$TREE_ROOT/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ')"
+fi
+DOMAIN_SUFFIX="${DOMAIN_SUFFIX:-local.sentin8.dev}"
+[ -n "$DOMAIN_SUFFIX" ] || { echo "[conformance-seed] no SENTIN8_DOMAIN found (mode file + tree .env both silent)" >&2; exit 1; }
 # The per-env tenant identity : the auth host + the user email
 # derive from the ENV SLUG; the suite callback/alias from the ALIAS.
 ENV_SLUG_ALPHA_OK="$(printf '%s' "$ENV_SLUG" | grep -cE '^[a-z0-9][a-z0-9-]*$' || true)"
@@ -135,9 +152,9 @@ ccall() { "$CLI" call "$@" 2>/dev/null | clipi; }
 # The CLI talks to the running platform (auth/sys via proxy :443). A
 # dead fleet produces DNS/connection errors that cascade confusingly
 # later - fail with the start hint instead.
-AUTH_HOST="${SENTIN8_SENTIN8_AUTH_URL:-https://auth.ops.sys.local.sentin8.dev}"
+AUTH_HOST="${SENTIN8_SENTIN8_AUTH_URL:-https://auth.ops.sys.${DOMAIN_SUFFIX}}"
 if ! curl -sk -o /dev/null --max-time 5 "$AUTH_HOST/v1/health" 2>/dev/null \
-   && ! getent hosts auth.ops.sys.local.sentin8.dev >/dev/null 2>&1; then
+   && ! getent hosts "auth.ops.sys.${DOMAIN_SUFFIX}" >/dev/null 2>&1; then
   log "platform not reachable at $AUTH_HOST - start it first:"
   log "  make start   (from $ROOT; classical mode for rig runs:"
   log "               SENTIN8_TLS_PQ_MODE=classical in the root .env)"
@@ -155,7 +172,8 @@ fi
 # ── 2. Organization + env (idempotent via slug lookup) ───────────────
 # The env must exist BEFORE the cert-user sign-up: the user provisions
 # into the tenant resolved from the sign-up hostname
-# (auth.cert.conformance-local.local.sentin8.dev → org/env), so the
+# (auth.cert.conformance-local.<domain> resolves the tenant from the
+# SNI-injected context: org/env), so the
 # OIDF suite's browser sign-in finds them in the cert tenant.
 # GET /v1/o returns a TOP-LEVEL ARRAY of orgs (widened limit - the
 # default page is 50 and a busy platform can exceed it).
@@ -1395,9 +1413,9 @@ if [ -n "$USER_ID" ]; then
       "family_name": "Certification",
       "nickname": "CertUser",
       "preferred_username": "certuser",
-      "profile": "https://conformance-local.local.sentin8.dev/profile/certuser",
-      "picture": "https://conformance-local.local.sentin8.dev/avatars/certuser.png",
-      "website": "https://conformance-local.local.sentin8.dev/~certuser",
+      "profile": "https://conformance-local.${DOMAIN_SUFFIX}/profile/certuser",
+      "picture": "https://conformance-local.${DOMAIN_SUFFIX}/avatars/certuser.png",
+      "website": "https://conformance-local.${DOMAIN_SUFFIX}/~certuser",
       "gender": "female",
       "birthdate": "1990-04-15",
       "zoneinfo": "America/Chicago",
@@ -1476,7 +1494,7 @@ chmod 600 "$CERT_USER_ENV"
 # only with a live holder; a re-seed keeps the block - the heredoc above
 # REWRITES the file, so the block must follow every write, not live as a
 # manual append the next seed would wipe).
-HOLDERSVC_HOST="https://wallet8-holder.ops.sys.local.sentin8.dev"
+HOLDERSVC_HOST="https://wallet8-holder.ops.sys.${DOMAIN_SUFFIX}"
 if curl -sk --max-time 5 "$HOLDERSVC_HOST/v1/health" 2>/dev/null | grep -aq "ok"; then
   # The holder's device key derivation mirrors holder server.rs (the
   # dev-tree data key + the user id): the plan config's client.jwks

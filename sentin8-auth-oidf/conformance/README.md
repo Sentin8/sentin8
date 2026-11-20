@@ -32,6 +32,34 @@
   `make infra-tls` once before the first `conformance-up` if the
   material is missing.
 
+## 1b. Rig domain mode (RIGMODE-1)
+
+The OP hostname under the rig is a make selection (auth DESIGN
+9a.2 item 2c) - no `.env` edit:
+
+```bash
+make conformance-domain-local                            # loopback wildcard (default)
+CONFORMANCE_DOMAIN=oidf.sentin8.dev \
+  make conformance-domain-platform                       # real domain, platform CA
+CONFORMANCE_DOMAIN=real.domain.example \
+  CONFORMANCE_ACME_UPSTREAM_URL=https://acme-staging-v02.api.letsencrypt.org/directory \
+  make conformance-domain-public                         # real domain, upstream CA
+```
+
+The chosen target writes `conformance/domain.env` (repo root, gitignored)
+- the ONE override block every rig consumer reads: `start-conformance`
+sources it after `.env` (so it wins), the seed/generator derive the
+tenant hosts from it, and `conformance-up` regenerates the suite
+container's family `extra_hosts` from it. After a mode change, restart
+the fleet (leaf caches are hostname-scoped): `make stop &&
+make conformance-up`.
+
+| Mode | `SENTIN8_DOMAIN` | Leaf issuer | Publicly resolvable |
+|---|---|---|---|
+| `local` | `local.sentin8.dev` | platform CA (HTTP-01 short-circuit) | resolves to 127.0.0.1 |
+| `platform` | operator domain (wildcard zone → the box) | platform CA | yes |
+| `public` | operator domain | upstream CA via acme's relay | yes, port 80 open |
+
 ## 2. Start the suite
 
 ```bash
