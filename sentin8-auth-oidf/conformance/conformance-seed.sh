@@ -324,20 +324,39 @@ d = key.private_numbers().private_value.to_bytes(32, 'big')
 d_b64 = base64.urlsafe_b64encode(d).rstrip(b'=').decode()
 kid = 'vci-attester-key'
 # The attestation signer key needs an x5c chain (VCIGenerateKeyAttestation:
-# "A x5c entry is required in the client's signing key"). Self-issue a
-# leaf certificate for the attester and embed the DER chain base64.
-name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, os.environ['VCIATT_CN'])])
+# "A x5c entry is required in the client's signing key"). Mint a 2-tier
+# chain: a self-signed ROOT CA (the trust anchor the mock AS pins) +
+# a LEAF issued by the root. The suite (X509CertificateUtil) rejects a
+# self-signed LEAF in x5c and rejects the Trust anchor inside x5c -
+# so x5c carries ONLY the leaf; the anchor config carries the ROOT.
+# name = root CA subject (the org CN); the leaf CN is the attester host.
+root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'vci-attester-root.' + os.environ['VCIATT_CN'].split('.', 1)[1] if '.' in os.environ['VCIATT_CN'] else 'vci-attester-root')])
+leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, os.environ['VCIATT_CN'])])
 now = datetime.datetime.now(datetime.timezone.utc)
+root_key = ec.generate_private_key(ec.SECP256R1())
+root_cert = (x509.CertificateBuilder()
+        .subject_name(root_name).issuer_name(root_name)
+        .public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(root_key, hashes.SHA256()))
 cert = (x509.CertificateBuilder()
-        .subject_name(name).issuer_name(name)
+        .subject_name(leaf_name).issuer_name(root_cert.subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=3650))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .sign(key, hashes.SHA256()))
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
+        .sign(root_key, hashes.SHA256()))
+# x5c = the leaf ONLY (the root is the trust anchor; the suite forbids
+# the self-signed root inside the chain).
 x5c = [base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()]
 leaf_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+root_pem = root_cert.public_bytes(serialization.Encoding.PEM).decode()
 private = {"kty": "EC", "kid": kid, "crv": "P-256", "x": x, "y": y, "d": d_b64, "alg": "ES256", "x5c": x5c}
 public = {"keys": [{"kty": "EC", "kid": kid, "use": "sig", "alg": "ES256", "crv": "P-256", "x": x, "y": y, "x5c": x5c}]}
 from cryptography.hazmat.primitives.serialization import PrivateFormat, NoEncryption
@@ -346,7 +365,7 @@ priv_pem = key.private_bytes(
     PrivateFormat.PKCS8,
     NoEncryption(),
 ).decode()
-print(json.dumps({"private": private, "public": public, "leaf_pem": leaf_pem, "priv_pem": priv_pem, "x5c": x5c}))
+print(json.dumps({"private": private, "public": public, "leaf_pem": leaf_pem, "priv_pem": priv_pem, "x5c": x5c, "root_pem": root_pem}))
 PYGENVCIATT
 )"
 VCIATT_KEY_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('priv_pem','').strip())")
@@ -361,7 +380,7 @@ der=''.join(l for l in pem.splitlines() if '-----' not in l).strip()
 print(base64.b64encode(base64.b64decode(der)).decode())")
 VCIATT_PRIV=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['private']))")
 VCIATT_PUB=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['public']))")
-VCIATT_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('leaf_pem','').rstrip())")
+VCIATT_PEM=$(echo "$VCIATT_KEYS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('root_pem','').rstrip())")
 
 # Attestation profile fields (vci_haip only): the trust anchor PEM
 # (attester self-signed leaf) + the expected attestation iss ride the
