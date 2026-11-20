@@ -60,6 +60,47 @@ make conformance-up`.
 | `platform` | operator domain (wildcard zone → the box) | platform CA | yes |
 | `public` | operator domain | upstream CA via acme's relay | yes, port 80 open |
 
+### 1c. Ingress reachability - when a mode actually needs the internet path
+
+The three modes differ in what must reach this box from OUTSIDE:
+
+| Mode | Who connects from outside | Inbound requirement |
+|---|---|---|
+| `local` | none - everything runs on this box | none |
+| `platform` | none for the campaign (browser, suite server, CLI, seed are all local) | none for the rig; only a REMOTE human browser testing `https://auth...` needs it |
+| `public` | the upstream CA's http-01 validator (port 80) | REQUIRED - the challenge never arrives otherwise and orders time out |
+
+On a WSL2 dev box the internet path has an extra hop the platform
+cannot provision itself (Windows-side, one-time, elevated PowerShell):
+
+```
+internet -> router(public IP) -> Windows host(LAN IP) --portproxy--> WSL2 VM -> sentin8-proxy
+```
+
+The router forwards `*.oidf.sentin8.dev`'s ports to the Windows LAN
+IP; WSL2 sits behind the Windows NAT, so the last hop needs a `netsh
+portproxy` - and because the WSL2 VM IP changes on every WSL restart,
+a static one dies silently. `scripts/windows/wsl-portproxy.ps1` (in the group
+tree) reconciles the forwarding to the live IP:
+
+```powershell
+# one-time install (also copies itself to C:\Scripts and registers the
+# logon + 5-minute refresh task):
+powershell -ExecutionPolicy Bypass -File scripts\windows\wsl-portproxy.ps1 -RegisterTask
+
+# verify from the WSL side (hits the Windows host directly - no hairpin):
+#   echo | openssl s_client -connect <windows-LAN-IP>:443 \
+#     -servername auth.cert.conformance-local.oidf.sentin8.dev | openssl x509 -noout -subject
+```
+
+The script listens on `0.0.0.0:80,443`, deletes only its OWN stale
+rows (our ports + a WSL-range connect address), keeps the firewall
+rule idempotent, and logs to
+`C:\ProgramData\sentin8\wsl-portproxy.log`. Verify the LAST hop
+externally with a public port-checker on the public IP (an in-box
+hairpin probe fails regardless - it egresses and has no shortcut
+back; do not trust its verdict).
+
 ## 2. Start the suite
 
 ```bash
