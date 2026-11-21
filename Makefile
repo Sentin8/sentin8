@@ -412,7 +412,7 @@ CONFORMANCE_MODE_FILE ?= conformance/domain.env
 # The battery family env slugs (mirrors conformance-seed-all.sh's FAMILY
 # map and gen-extra-hosts.sh's FAMILIES - that table is the source of
 # truth; keep the three in lockstep).
-CONFORMANCE_FAMILY_SLUGS := cert cert-fcl cert-imp cert-hyb cert-fp cert-sm cert-vp cert-f2m cert-fapi1 cert-ciba cert-vci cert-haip cert-wallet cert-vpw
+CONFORMANCE_FAMILY_SLUGS := cert cert-fcl cert-imp cert-hyb cert-fp cert-sm cert-vp cert-f2m cert-fapi1 cert-fapi2 cert-ciba cert-vci cert-haip cert-wallet cert-vpw
 
 conformance-domain-local: ## Rig domain mode: loopback wildcard (local.sentin8.dev, platform CA)
 	@mkdir -p $(dir $(CONFORMANCE_MODE_FILE))
