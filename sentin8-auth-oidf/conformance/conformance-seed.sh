@@ -1081,8 +1081,15 @@ echo "attestation_issuer(vciatt)=${ATTESTATION_ISSUER:-https://vci-attester.conf
 # line the seed of the same tree writes).
 # B1: the verifier's human identity (OID4VP-1FINAL-5.1 verifier_info) -
 # the suite's AddVerifierInfoToAuthorizationEndpointRequest reads it
-# from the plan config's client block.
-echo 'verifier_info(verifier)={"name":"Sentin8 Verifier","purpose":["identity presentation verification"]}' >> "$SEED_OUT"
+# from the plan config's client block. The 5.1 contract: a non-empty
+# ARRAY of attestations, each {format, data} (+ optional
+# credential_ids), additionalProperties:false - the suite's
+# ValidateVerifierInfo json-schema enforces exactly that shape; a
+# bare {name, purpose} object failed every wallet module with
+# 'Found invalid entries in verifier_info input'. The identity rides
+# `data`; `format` names it (5.11: an ecosystem-defined format the
+# wallet MAY ignore - human-oriented members live inside `data`).
+echo 'verifier_info(verifier)=[{"format":"dev.sentin8.verifier-identity","data":{"name":"Sentin8 Verifier","purpose":["identity presentation verification"]}}]' >> "$SEED_OUT"
 # B4 stays an inventory item: the suite-hosted VICAL/revocation
 # endpoints the conditions reference are not verified to exist per
 # campaign alias - emitting an unverified URL would 404 inside a plan.
