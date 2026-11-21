@@ -87,7 +87,8 @@ space := $(empty) $(empty)
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
 	core-up core-down core-logs core-status \
 	conformance-up conformance-down conformance-purge conformance-seed \
-       conformance-seed-all conformance-all \
+       conformance-seed-all conformance-all conformance-hosted \
+       conformance-hosted-bootstrap conformance-hosted-up \
        conformance-domain-local conformance-domain-platform conformance-domain-public
 
 help: ## Show this help
@@ -469,6 +470,15 @@ start-conformance: ## Start the platform fleet in the rig posture (classical TLS
 		$(call stamp_env,sentin8-cli) $(CARGO) run $(RELEASE) --quiet --bin sentin8-cli -- captain start; \
 	fi
 
+conformance-hosted-bootstrap: ## Hosted suite (certification.openid.net): the ONE interactive step - sign-in + mint the API token
+	CONFORMANCE_SUITE_TARGET=hosted $(MAKE) --no-print-directory -C sentin8-auth-oidf bootstrap-suite-token
+
+conformance-hosted-up: start-conformance ## Hosted target: platform fleet in public rig posture (NO suite docker - the OIDF instance is hosted)
+	@if [ ! -f $(CONFORMANCE_MODE_FILE) ]; then echo 'No $(CONFORMANCE_MODE_FILE) - select the rig domain mode first:'; echo '  make conformance-domain-public CONFORMANCE_DOMAIN=<domain> CONFORMANCE_ACME_UPSTREAM_URL=<le-directory>'; exit 1; fi
+	@echo "hosted target: the suite runs at https://www.certification.openid.net (no local stack);"
+	@echo "  the OP under test must be publicly reachable (the $(CONFORMANCE_MODE_FILE) mode)."
+	@echo "  next: make conformance-seed-all (CONFORMANCE_SUITE_TARGET=hosted) then the battery"
+
 conformance-up: start-conformance ## Start the OIDF conformance suite stack (mongo + server + nginx at :8443)
 	# Bake the platform root CA into the suite server image's JVM truststore
 	# (copied into the build context by this target; the derived image
@@ -512,3 +522,6 @@ conformance-seed-all: ## Provision EVERY family env (profile-per-env, OC-20 - on
 
 conformance-all: ## Run the WHOLE battery (each family against its own env; seed first: conformance-seed-all)
 	bash sentin8-auth-oidf/conformance/conformance-run-all.sh
+
+conformance-hosted: ## Run the battery against the HOSTED suite (certification.openid.net; bootstrap + hosted-up + seed first)
+	CONFORMANCE_SUITE_TARGET=hosted bash sentin8-auth-oidf/conformance/conformance-run-all.sh

@@ -82,7 +82,19 @@ if [ "$ENV_SLUG_ALPHA_OK" != "1" ] || [ "$ALIAS_URL_OK" != "1" ]; then
   echo "[conformance-seed] invalid CONFORMANCE_ENV_SLUG ('$ENV_SLUG') or CONFORMANCE_ALIAS ('$ALIAS') - both must match ^[a-z0-9][a-z0-9-]*$" >&2
   exit 1
 fi
-CALLBACK="https://localhost.emobix.co.uk:8443/test/a/${ALIAS}/callback"
+# The suite base (DESIGN 9a.2d): hosted runs the callback against the
+# OIDF production instance (the OP under test must then be publicly
+# reachable); the rig keeps localhost.emobix (the docker nginx alias).
+SUIT_BASE="${CONFORMANCE_SUITE_URL:-}"
+if [ -z "$SUIT_BASE" ] && [ "${CONFORMANCE_SUITE_TARGET:-rig}" = "hosted" ]; then
+  SUIT_BASE="https://www.certification.openid.net"
+fi
+if [ -n "$SUIT_BASE" ]; then
+  SUIT_BASE="${SUIT_BASE%/}"
+  CALLBACK="${SUIT_BASE}/test/a/${ALIAS}/callback"
+else
+  CALLBACK="https://localhost.emobix.co.uk:8443/test/a/${ALIAS}/callback"
+fi
 USER_EMAIL="${CONFORMANCE_USER_EMAIL:-cert-user@${ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}}"
 USER_PASSWORD="${CONFORMANCE_USER_PASSWORD:-Certification!2026}"
 CERT_AUTH_HOST="https://auth.${ENV_SLUG}.${ORG_SLUG}.${DOMAIN_SUFFIX}"
@@ -685,9 +697,50 @@ rical_b64 = base64.b64encode(cose_sign1).decode()
 d_b64 = base64.urlsafe_b64encode(
     pk.private_numbers().private_value.to_bytes(32, "big")
 ).rstrip(b"=").decode()
+
+# THE OP-SIDE LEAF: a SECOND certificate bound to AUTH'S OWN ES256 key
+# (the same JWKS point `pub` names - auth holds THAT private key) signed
+# by the SAME rig CA. The OP (auth) signs its request objects,
+# credentials, and status-list tokens with ITS key + THIS leaf - the
+# chain is CA-signed (the suite's
+# ValidateSdJwtCredentialX5cCertificateChain rejects a self-signed leaf),
+# verifiable against the RICAL/CA anchor, and the request object's
+# client_id rides x509_hash(leaf) - the hash of x5c[0], exactly what
+# ValidateX509HashClient expects. The suite-side fresh mint above stays
+# for the SUITE's own credential-signing JWK (credential.signing_jwk).
+op_pub = pub
+op_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_url)])
+op_point = None
+try:
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicNumbers
+    op_pub_key = EllipticCurvePublicNumbers(
+        int.from_bytes(base64.urlsafe_b64decode(pub["x"] + "=="), "big"),
+        int.from_bytes(base64.urlsafe_b64decode(pub["y"] + "=="), "big"),
+        ec.SECP256R1(),
+    ).public_key()
+    op_leaf = (x509.CertificateBuilder()
+        .subject_name(op_name).issuer_name(ca_name)
+        .public_key(op_pub_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_cert_sign=False, crl_sign=False,
+            content_commitment=False, data_encipherment=False,
+            encipher_only=False, decipher_only=False,
+            key_agreement=False, key_encipherment=False), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(op_pub_key), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+            x509.SubjectKeyIdentifier(ca_ski)), critical=False)
+        .sign(ca_key, hashes.SHA256()))
+    op_leaf_der_b64 = base64.b64encode(op_leaf.public_bytes(serialization.Encoding.DER)).decode()
+except Exception:
+    op_leaf_der_b64 = ""
+
 print(json.dumps({
   "leaf_der_b64": base64.b64encode(leaf.public_bytes(serialization.Encoding.DER)).decode(),
   "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
+  "op_leaf_der_b64": op_leaf_der_b64,
   "x": x_b64,
   "y": y_b64,
   "kid": kid_mint,
@@ -710,6 +763,25 @@ PYGENHAIP
     exit 1
   fi
   HAIP_CA_PEM="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ca_pem'])")"
+  # The OP-SIDE leaf (auth's key CA-signed): the profile's issuance_leaf
+  # is the chain AUTH can actually SIGN with (its own key) and the suite
+  # accepts (CA-signed, x509_hash matches its client_id). The SUITE's
+  # fresh mint stays the credential.signing_jwk identity.
+  OP_LEAF_DER_B64="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('op_leaf_der_b64',''))")"
+  if [ -n "$OP_LEAF_DER_B64" ]; then
+    OP_LEAF_PEM="$(python3 - "$OP_LEAF_DER_B64" <<'PYOPPEM'
+import sys, base64
+b64 = base64.b64encode(base64.b64decode(sys.argv[1])).decode()
+print("-----BEGIN CERTIFICATE-----")
+for i in range(0, len(b64), 64):
+    print(b64[i:i+64])
+print("-----END CERTIFICATE-----")
+PYOPPEM
+)"
+    OP_LEAF_JSON="$(printf '%s' "$OP_LEAF_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  else
+    OP_LEAF_JSON=""
+  fi
   # x5c leaf PEM for the seed-out + the profile JSON fields.
   HAIP_LEAF_PEM="$(python3 - "$HAIP_LEAF_DER_B64" <<'PYHAIPPEM'
 import sys, base64
@@ -720,9 +792,11 @@ for i in range(0, len(b64), 64):
 print("-----END CERTIFICATE-----")
 PYHAIPPEM
 )"
-  HAIP_LEAF_JSON="$(printf '%s' "$HAIP_LEAF_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  # The PROFILE's issuance leaf: the OP-side (auth-signKeyable) leaf when
+  # minted; else the suite's fresh-mint leaf (the legacy shape).
+  PROFILE_LEAF_JSON="${OP_LEAF_JSON:-$(printf '%s' "$HAIP_LEAF_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")}"
   HAIP_CHAIN_JSON="$(printf '%s' "$HAIP_CA_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
-  ATTESTATION_FIELDS="${ATTESTATION_FIELDS},\"issuance_leaf_pem\":${HAIP_LEAF_JSON},\"issuance_chain_pem\":${HAIP_CHAIN_JSON}"
+  ATTESTATION_FIELDS="${ATTESTATION_FIELDS},\"issuance_leaf_pem\":${PROFILE_LEAF_JSON},\"issuance_chain_pem\":${HAIP_CHAIN_JSON}"
   HAIP_CA_PEM_EXPORTED="$HAIP_CA_PEM"
   HAIP_LEAF_DER_B64_EXPORTED="$HAIP_LEAF_DER_B64"
   HAIP_ISSUER_XY_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kid'], d['x'], d['y'])")"
@@ -766,7 +840,10 @@ if [ "$PROFILE" == "vp" ] && [ -n "${HAIP_ISSUER_XY_EXPORTED:-}" ]; then
   # credential's `iss` - the suite mints credentials there). The
   # spec's own registration refreshes this entry with the campaign's
   # fresh wallet key (the seed's entry is the idempotent bootstrap).
-  WALLET_TRUST="$(printf '%s' "{\"issuer\":\"https://localhost.emobix.co.uk:8443/test/a/$ALIAS\",\"jwks\":{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"x\":\"$(echo "$HAIP_ISSUER_XY_EXPORTED" | cut -d' ' -f2)\",\"y\":\"$(echo "$HAIP_ISSUER_XY_EXPORTED" | cut -d' ' -f3)\"}]}}" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  # Derived from CALLBACK (strip the /callback tail -> the alias root,
+  # the suite-target switch, DESIGN 9a.2d).
+  WALLET_ISSUER="${CALLBACK%/callback}"
+  WALLET_TRUST="$(printf '%s' "{\"issuer\":\"$WALLET_ISSUER\",\"jwks\":{\"keys\":[{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"x\":\"$(echo "$HAIP_ISSUER_XY_EXPORTED" | cut -d' ' -f2)\",\"y\":\"$(echo "$HAIP_ISSUER_XY_EXPORTED" | cut -d' ' -f3)\"}]}}" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
   CONN_LIST="$(ccall auth GET /v1/admin/enterprise-connections --env "$ENV_ID" 2>/dev/null || echo '[]')"
   OLD_CONN_ID="$(echo "$CONN_LIST" | python3 -c "
 import json,sys
@@ -932,8 +1009,8 @@ print(json.dumps({"keys": [private]}))
 PYGENJWKS
 )"
 BASIC_JWKS_PUB=$(echo "$BASIC_JWKS_KEYS")
-BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",\"jwks\":$BASIC_JWKS_PUB,$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
-POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",\"jwks\":$BASIC_JWKS_PUB,$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
 PKCE_JSON="$(dcr "cert-public-pkce" "\"token_endpoint_auth_method\":\"none\",$HYBRID_RESPONSE_TYPES")"
 
 # RFC 8628 device-flow client - the rotate-keys module's operator grant
@@ -1620,4 +1697,5 @@ else
   log "holder not reachable - wallet campaign env SKIPPED (the battery's wallet spec degrades to the issuer-side form)"
 fi
 log "wrote $CERT_USER_ENV"
-log "next: open https://localhost.emobix.co.uk:8443/ and create the test plans (runbook §4)"
+log "callback: $CALLBACK"
+log "next: open the suite and create the test plans (runbook §4) - suite base: ${SUIT_BASE:-https://localhost.emobix.co.uk:8443}"

@@ -186,6 +186,65 @@ make conformance-down     # stop (keeps mongo volume for history)
 make conformance-purge    # stop + delete the volume (clean slate)
 ```
 
+## 6b. HOSTED target - the OIDF production suite (auth DESIGN 9a.2d)
+
+The same harness drives `https://www.certification.openid.net` - the
+OIDF-operated instance certification results must run on for a
+submission. No suite Docker stack runs there; the differences are the
+suite base + the API auth:
+
+1. **Sign in once (interactive).** The instance requires a real
+   Google/GitLab sign-in (no devmode dummy user). The bootstrap spec
+   opens the browser for it and then mints the campaign's API bearer
+   token under the signed-in session (`POST /api/token` - the same
+   call the suite's Tokens page makes; admins cannot mint - use a
+   non-admin account):
+
+   ```bash
+   make conformance-hosted-bootstrap
+   # or: cd sentin8-auth-oidf && CONFORMANCE_SUITE_TARGET=hosted \
+   #       pnpm exec playwright test tests/suite-token-bootstrap.spec.ts
+   ```
+
+   The token (24h TTL by default; `CONFORMANCE_SUITE_TOKEN_PERMANENT=true`
+   mints a permanent one - delete it from the suite after the
+   campaign) persists to `.tmp/conformance/suite-token.env` (chmod 600).
+2. **Publicly reachable OP.** The suite's server-side clients AND the
+   browser callbacks must reach the certification host - run the
+   platform fleet in the `public` rig domain mode (§1, §1b; the
+   portproxy collateral is the same):
+
+   ```bash
+   make conformance-hosted-up   # start-conformance + the mode check; NO suite docker
+   ```
+3. **Seed with the hosted callback.** The seed builds the DCR callback
+   from the same switch:
+
+   ```bash
+   CONFORMANCE_SUITE_TARGET=hosted \
+     SENTIN8_SENTIN8_AUTH_URL="https://auth.ops.sys.oidf.sentin8.dev" \
+     make conformance-seed-all
+   ```
+   (each per-env callback becomes
+   `https://www.certification.openid.net/test/a/<alias>/callback`).
+4. **Run the battery.** The runner gates the token (a missing one
+   fails loud with the bootstrap hint) and carries it to every suite
+   call as `Authorization: Bearer`:
+
+   ```bash
+   CONFORMANCE_SUITE_TARGET=hosted \
+     SENTIN8_SENTIN8_AUTH_URL="https://auth.ops.sys.oidf.sentin8.dev" \
+     make conformance-hosted    # or: bash conformance/conformance-run-all.sh <families>
+   ```
+
+   A suite 401 mid-battery is answered loud - re-run the bootstrap,
+   never a silent re-login.
+5. **`staging.certification.openid.net`** (the suite's master branch,
+   continuously deployed): pass
+   `CONFORMANCE_SUITE_URL=https://staging.certification.openid.net`
+   instead of the target switch - the token bootstrap + battery read
+   the same override.
+
 ## 7. Submission (operator step, after local green)
 
 Publish the runs on the OIDF suite, file the certification requests per
