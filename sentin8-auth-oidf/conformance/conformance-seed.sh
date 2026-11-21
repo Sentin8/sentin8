@@ -122,7 +122,13 @@ for part in sys.argv[2].split('.'):
             cur=cur[int(idx)]
     else:
         cur=cur.get(part) if isinstance(cur,dict) else None
-print(cur if cur is not None else '')
+# Structural members (jwks) ride downstream as JSON: print the actual
+# JSON text for containers so a TS consumer can json.loads the line
+# directly (python repr's single quotes are not JSON).
+if isinstance(cur, (dict, list)):
+    print(json.dumps(cur) if cur is not None else '')
+else:
+    print(cur if cur is not None else '')
 " "$1" "$2"; }
 
 # clipi - read stdin, strip everything before the first '[' or '{' (the
@@ -905,8 +911,27 @@ case "$PROFILE" in
   implicit|hybrid|formpost) : ;;
   *) HYBRID_RESPONSE_TYPES="\"response_types\":[\"code\"]" ;;
 esac
-BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
-POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+# CLAIMS-B (B2): the client_secret_* clients carry a jwks member too -
+# the structural RFC 7517 conditions (valid JWK set, no private key
+# material in the config, distinct kids) arm on the client block's
+# jwks; a client with no jwks skips them. One RSA-PS256 pair per
+# family (the CIBA pattern: the jwks members are structurally checked,
+# never used to authenticate here).
+BASIC_JWKS_KEYS="$(python3 - <<'PYGENJWKS'
+import base64, json
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+rn = key.public_key().public_numbers()
+def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
+kid = 'basic-jwks-key'
+public = {"keys": [{"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
+print(json.dumps(public))
+PYGENJWKS
+)"
+BASIC_JWKS_PUB=$(echo "$BASIC_JWKS_KEYS")
+BASIC_JSON="$(dcr "cert-basic-basic" "\"token_endpoint_auth_method\":\"client_secret_basic\",\"jwks\":$BASIC_JWKS_PUB,$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
+POSTC_JSON="$(dcr "cert-basic-post" "\"token_endpoint_auth_method\":\"client_secret_post\",\"jwks\":$BASIC_JWKS_PUB,$HYBRID_RESPONSE_TYPES,\"post_logout_redirect_uris\":[\"${CALLBACK%/callback}/post_logout_redirect\"]")"
 PKCE_JSON="$(dcr "cert-public-pkce" "\"token_endpoint_auth_method\":\"none\",$HYBRID_RESPONSE_TYPES")"
 
 # RFC 8628 device-flow client - the rotate-keys module's operator grant
@@ -970,9 +995,41 @@ echo "attester_pem(vciatt)=$VCIATT_PEM" >> "$SEED_OUT"
 # bytes - no newlines; the spec regex reads it whole).
 [ -n "${HAIP_RICAL_B64_EXPORTED:-}" ] && echo "rical_b64(rical)=$HAIP_RICAL_B64_EXPORTED" >> "$SEED_OUT"
 echo "attestation_issuer(vciatt)=${ATTESTATION_ISSUER:-https://vci-attester.conformance-local}" >> "$SEED_OUT"
+
+# ── CLAIMS-B seed-out lines (sentin8-auth-oidf README, Category-B) ──
+# The harness/registration material the specs consume - emitted next to
+# the rical/anchor lines (the same key=value convention; a spec reads a
+# line the seed of the same tree writes).
+# B1: the verifier's human identity (OID4VP-1FINAL-5.1 verifier_info) -
+# the suite's AddVerifierInfoToAuthorizationEndpointRequest reads it
+# from the plan config's client block.
+echo 'verifier_info(verifier)={"name":"Sentin8 Verifier","purpose":["identity presentation verification"]}' >> "$SEED_OUT"
+# B4 stays an inventory item: the suite-hosted VICAL/revocation
+# endpoints the conditions reference are not verified to exist per
+# campaign alias - emitting an unverified URL would 404 inside a plan.
+# The seed emits the line ONLY when the operator confirms the alias
+# hosts the surface (VICAL_URL set in the environment).
+[ -n "${VICAL_URL:-}" ] && echo "vical_url(vciatt)=${VICAL_URL}" >> "$SEED_OUT"
 emit_client() { # emit_client <name> <json>
   echo "client_id($1)=$(jget "$2" client_id)" | tee -a "$SEED_OUT"
   echo "client_secret($1)=$(jget "$2" client_secret)" | tee -a "$SEED_OUT"
+  # CLAIMS-B (B2): the registered jwks (the structural RFC 7517 family
+  # reads the plan config's client.jwks). The DCR 201 response omits the
+  # jwks member (RFC 7591 3.2.1 echo set) - the RFC 7592 registration-read
+  # endpoint serves it; fetch with this registration's access token when
+  # the DCR body itself lacks the member.
+  JVAL="$(jget "$2" jwks)"
+  if [ -z "$JVAL" ]; then
+    local jcid jrat jread
+    jcid="$(jget "$2" client_id)"
+    jrat="$(jget "$2" registration_access_token)"
+    if [ -n "$jcid" ] && [ -n "$jrat" ]; then
+      jread="$(curl -sk "$CERT_AUTH_HOST/oauth/register/$jcid" \
+        -H "Authorization: Bearer $jrat")"
+      JVAL="$(jget "$jread" jwks)"
+    fi
+  fi
+  [ -n "$JVAL" ] && echo "client_jwks($1)=$JVAL" | tee -a "$SEED_OUT"
   # RFC 7592 client-config token - the harness's registration
   # surface for STATIC clients (the Back-Channel OP plan's
   # backchannel_logout_uri PUT rides this; auth DESIGN 9a.26).
