@@ -912,11 +912,13 @@ case "$PROFILE" in
   *) HYBRID_RESPONSE_TYPES="\"response_types\":[\"code\"]" ;;
 esac
 # CLAIMS-B (B2): the client_secret_* clients carry a jwks member too -
-# the structural RFC 7517 conditions (valid JWK set, no private key
-# material in the config, distinct kids) arm on the client block's
-# jwks; a client with no jwks skips them. One RSA-PS256 pair per
-# family (the CIBA pattern: the jwks members are structurally checked,
-# never used to authenticate here).
+# the structural RFC 7517 conditions (valid JWK set, private part
+# present per ValidateClientJWKsPrivatePart, distinct kids) arm on the
+# client block's jwks; a client with no jwks skips them. The suite's
+# static-client validator demands the PRIVATE part ('d') - a public-only
+# JWK fails RFC7517-1.1 outright - so the emitted member carries d (the
+# CIBA pattern: one RSA-PS256 pair per family; the jwks members are
+# structurally checked, never used to authenticate here).
 BASIC_JWKS_KEYS="$(python3 - <<'PYGENJWKS'
 import base64, json
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -925,8 +927,8 @@ key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 rn = key.public_key().public_numbers()
 def _bn(v): return base64.urlsafe_b64encode(v.to_bytes((v.bit_length()+7)//8, 'big')).rstrip(b'=').decode()
 kid = 'basic-jwks-key'
-public = {"keys": [{"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e)}]}
-print(json.dumps(public))
+private = {"kty": "RSA", "kid": kid, "use": "sig", "alg": "PS256", "n": _bn(rn.n), "e": _bn(rn.e), "d": _bn(key.private_numbers().d)}
+print(json.dumps({"keys": [private]}))
 PYGENJWKS
 )"
 BASIC_JWKS_PUB=$(echo "$BASIC_JWKS_KEYS")
