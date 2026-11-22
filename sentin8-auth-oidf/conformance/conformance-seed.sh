@@ -74,6 +74,14 @@ if [ -z "$DOMAIN_SUFFIX" ] && [ -f "$TREE_ROOT/.env" ]; then
 fi
 DOMAIN_SUFFIX="${DOMAIN_SUFFIX:-local.sentin8.dev}"
 [ -n "$DOMAIN_SUFFIX" ] || { echo "[conformance-seed] no SENTIN8_DOMAIN found (mode file + tree .env both silent)" >&2; exit 1; }
+# Export the resolved zone: the mdoc certificate mints (the IACA/DS
+# profiles' CRL Distribution Points + Issuer Alternative Names, DESIGN
+# 9a.19x) derive the ACME CA plane's URL from SENTIN8_DOMAIN - the
+# python heredocs read os.environ['SENTIN8_DOMAIN'] and would otherwise
+# fall back to the default zone, pinning the wrong host into the
+# issuance chain the OP serves (the live platform runs the fleet's own
+# zone already; this only aligns the seed's mint).
+export SENTIN8_DOMAIN="$DOMAIN_SUFFIX"
 # The per-env tenant identity : the auth host + the user email
 # derive from the ENV SLUG; the suite callback/alias from the ALIAS.
 ENV_SLUG_ALPHA_OK="$(printf '%s' "$ENV_SLUG" | grep -cE '^[a-z0-9][a-z0-9-]*$' || true)"
@@ -508,31 +516,76 @@ kid_mint = "haip-mint-" + x_b64[:8]
 
 ca_key = ec.generate_private_key(ec.SECP256R1())
 now = datetime.datetime.now(datetime.timezone.utc)
-ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sentin8-haip-issuance-ca")])
+# The IACA profile shape (ISO 18013-5 Table B.1, the suite's
+# ValidateMdocTrustAnchorIacaCertificateProfile): the subject carries C
+# (PrintableString country code) + CN, the keyUsage asserts ONLY
+# keyCertSign + cRLSign (bit 0 - digitalSignature - is a Table B.1
+# violation), the BasicConstraints pathLenConstraint is 0, and the
+# Issuer Alternative Name carries an rfc822Name/URI. The 3650-day window
+# sits inside the validator's 7305-day cap.
+ca_name = x509.Name([
+    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sentin8"),
+    x509.NameAttribute(NameOID.COMMON_NAME, "sentin8-haip-issuance-ca"),
+])
 ca = (x509.CertificateBuilder()
       .subject_name(ca_name).issuer_name(ca_name)
       .public_key(ca_key.public_key())
       .serial_number(x509.random_serial_number())
       .not_valid_before(now - datetime.timedelta(days=1))
       .not_valid_after(now + datetime.timedelta(days=3650))
-      .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+      .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
       .add_extension(x509.KeyUsage(
-          digital_signature=True, key_cert_sign=True, crl_sign=True,
+          digital_signature=False, key_cert_sign=True, crl_sign=True,
           content_commitment=False, data_encipherment=False,
           encipher_only=False, decipher_only=False,
           key_agreement=False, key_encipherment=False), critical=True)
+      .add_extension(x509.IssuerAlternativeName([
+          x509.UniformResourceIdentifier(
+              f"https://acme.ops.sys.{os.environ.get('SENTIN8_DOMAIN', 'local.sentin8.dev')}/crl")
+      ]), critical=False)
       .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
       .sign(ca_key, hashes.SHA256()))
 ca_ski = ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value.digest
+DOMAIN_NOW = os.environ.get('SENTIN8_DOMAIN', 'local.sentin8.dev')
+# The DS leaf profile (ISO 18013-5 Table B.3 + the mdoc DS certificate
+# check): the critical EKU naming the document-signing key purpose, the
+# CRL Distribution Point (the suite fetches a v2 CRL from it), the
+# Issuer Alternative Name, subject C (= the credentials' issuing_country,
+# 'US') + CN, digitalSignature-only keyUsage, AKI matching the CA's SKI,
+# and a 400-day validity inside the validator's 457-day cap (the same
+# window the suite's own reference mint uses).
 # The serial stays a python int (the RICAL entry encodes it as a CBOR
 # uint - ValidateRicalStructure: "'serialNumber' must be a biguint...").
-leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_url)])
+leaf_name = x509.Name([
+    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sentin8"),
+    x509.NameAttribute(NameOID.COMMON_NAME, issuer_url),
+])
 leaf = (x509.CertificateBuilder()
         .subject_name(leaf_name).issuer_name(ca_name)
         .public_key(sign_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
-        .not_valid_after(now + datetime.timedelta(days=3650))
+        .not_valid_after(now + datetime.timedelta(days=400))
+        # The document-signing EKU (1.0.18013.5.1.2) - CRITICAL
+        # (ValidateMdocDsCertificateProfile demands the critical form).
+        .add_extension(x509.ExtendedKeyUsage(
+            [x509.ObjectIdentifier("1.0.18013.5.1.2")]), critical=True)
+        # The CRL Distribution Point: the OP's PROFILE route serving the
+        # RIG CA's CRL (minted below with the CA's own key - the ISO CRL
+        # profile's issuer-binary-match demands it; the suite fetches it
+        # with Accept: application/pkix-crl).
+        .add_extension(x509.CRLDistributionPoints([
+            x509.DistributionPoint(
+                full_name=[x509.UniformResourceIdentifier(
+                    issuer_url + "/oauth/credentials/issuance-crl")],
+                relative_name=None, reasons=None, crl_issuer=None)
+        ]), critical=False)
+        # The Issuer Alternative Name (rfc822Name) - Table B.3.
+        .add_extension(x509.IssuerAlternativeName([
+            x509.RFC822Name(f"issuer@ops.sys.{DOMAIN_NOW}")
+        ]), critical=False)
         # multipaz validateCertificationTrustPath: the chain's FIRST
         # cert (the request object's signer) must carry the
         # digitalSignature key usage ("Certificate is not a signing
@@ -708,8 +761,22 @@ d_b64 = base64.urlsafe_b64encode(
 # client_id rides x509_hash(leaf) - the hash of x5c[0], exactly what
 # ValidateX509HashClient expects. The suite-side fresh mint above stays
 # for the SUITE's own credential-signing JWK (credential.signing_jwk).
+#
+# THE OP-SIDE LEAF IS THE MDOC DS CERTIFICATE + the status-list CWT's
+# x5chain leaf (the profile's issuance_leaf_pem) - it carries the FULL
+# ISO 18013-5 shape: subject C (= the credentials' issuing_country, US)
+# + CN, the CRITICAL document-signing EKU (1.0.18013.5.1.2 - the DS
+# profile's unconditional critical-EKU check), the CRL Distribution
+# Point, the Issuer Alternative Name (rfc822Name), digitalSignature-only
+# keyUsage, AKI (the B.9 status-list signer profile requires it), SKI,
+# and a 400-day validity inside the DS's 457-day cap AND the B.9
+# status-list signer's 1187-day cap.
 op_pub = pub
-op_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_url)])
+op_name = x509.Name([
+    x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sentin8"),
+    x509.NameAttribute(NameOID.COMMON_NAME, issuer_url),
+])
 op_point = None
 try:
     from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicNumbers
@@ -718,12 +785,24 @@ try:
         int.from_bytes(base64.urlsafe_b64decode(pub["y"] + "=="), "big"),
         ec.SECP256R1(),
     ).public_key()
+    DOMAIN_SEED = os.environ.get('SENTIN8_DOMAIN', 'local.sentin8.dev')
     op_leaf = (x509.CertificateBuilder()
         .subject_name(op_name).issuer_name(ca_name)
         .public_key(op_pub_key)
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
-        .not_valid_after(now + datetime.timedelta(days=3650))
+        .not_valid_after(now + datetime.timedelta(days=400))
+        .add_extension(x509.ExtendedKeyUsage(
+            [x509.ObjectIdentifier("1.0.18013.5.1.2")]), critical=True)
+        .add_extension(x509.CRLDistributionPoints([
+            x509.DistributionPoint(
+                full_name=[x509.UniformResourceIdentifier(
+                    issuer_url + "/oauth/credentials/issuance-crl")],
+                relative_name=None, reasons=None, crl_issuer=None)
+        ]), critical=False)
+        .add_extension(x509.IssuerAlternativeName([
+            x509.RFC822Name(f"issuer@ops.sys.{DOMAIN_SEED}")
+        ]), critical=False)
         .add_extension(x509.KeyUsage(
             digital_signature=True, key_cert_sign=False, crl_sign=False,
             content_commitment=False, data_encipherment=False,
@@ -734,13 +813,95 @@ try:
             x509.SubjectKeyIdentifier(ca_ski)), critical=False)
         .sign(ca_key, hashes.SHA256()))
     op_leaf_der_b64 = base64.b64encode(op_leaf.public_bytes(serialization.Encoding.DER)).decode()
+    # THE STATUS-LIST SIGNER LEAF (Table B.9 shape): a SECOND leaf on the
+    # SAME auth key - the MSO revocation CWT's x5chain carries it so the
+    # suite's ValidateMdocRevocationListSignerCertificateProfile sees the
+    # B.9 profile (NO extended key usage - a critical EKU on the status
+    # signer is a B.9 recommendation violation; the digitalSignature-only
+    # keyUsage, AKI, SKI, CRLDP, IAN and C subject stay) while the mdoc
+    # DS certificate keeps the DS profile's CRITICAL EKU. Same key, same
+    # CA, different leaf - the chain-top issuer check (the CWT chain's
+    # top cert must share the DS cert's issuer) still passes.
+    status_der_b64 = ""
+    try:
+        status_name = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Sentin8"),
+            x509.NameAttribute(NameOID.COMMON_NAME, issuer_url + "-status"),
+        ])
+        status_leaf = (x509.CertificateBuilder()
+            .subject_name(status_name).issuer_name(ca_name)
+            .public_key(op_pub_key)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=400))
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, key_cert_sign=False, crl_sign=False,
+                content_commitment=False, data_encipherment=False,
+                encipher_only=False, decipher_only=False,
+                key_agreement=False, key_encipherment=False), critical=True)
+            .add_extension(x509.CRLDistributionPoints([
+                x509.DistributionPoint(
+                    full_name=[x509.UniformResourceIdentifier(
+                        issuer_url + "/oauth/credentials/issuance-crl")],
+                    relative_name=None, reasons=None, crl_issuer=None)
+            ]), critical=False)
+            .add_extension(x509.IssuerAlternativeName([
+                x509.RFC822Name(f"status@ops.sys.{DOMAIN_SEED}")
+            ]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(op_pub_key), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                x509.SubjectKeyIdentifier(ca_ski)), critical=False)
+            .sign(ca_key, hashes.SHA256()))
+        status_der_b64 = base64.b64encode(status_leaf.public_bytes(serialization.Encoding.DER)).decode()
+    except Exception:
+        status_der_b64 = ""
 except Exception:
     op_leaf_der_b64 = ""
+
+def _pem_from_der_b64(b64):
+    body = base64.b64encode(base64.b64decode(b64)).decode()
+    lines = "\n".join(body[i:i+64] for i in range(0, len(body), 64))
+    return "-----BEGIN CERTIFICATE-----\n" + lines + "\n-----END CERTIFICATE-----"
+
+status_pem = _pem_from_der_b64(status_der_b64) if status_der_b64 else ""
+chain_pem = (status_pem + "\n" + ca.public_bytes(serialization.Encoding.PEM).decode()) if status_pem \
+    else ca.public_bytes(serialization.Encoding.PEM).decode()
+
+# THE RIG CA'S CRL (9a.19x certificate-profile pass): the ISO CRL
+# profile demands the CRL's issuer be the DS certificate's issuer (the
+# rig CA) with a matching AKI and a signature that verifies against the
+# CA's key - the seed holds the CA key, so it mints the v2 CRL here (7-day
+# nextUpdate, CRL Number = epoch seconds, AKI from the CA's SKI, no
+# entries) and the OP serves the bytes at the profile's issuance-CRL
+# route until the next profile refresh (the campaign cadence).
+crl_der = None
+try:
+    from cryptography import x509 as _x509
+    from cryptography.hazmat.primitives import hashes as _hashes
+    _now = datetime.datetime.now(datetime.timezone.utc)
+    _builder = _x509.CertificateRevocationListBuilder()
+    _builder = _builder.issuer_name(ca.subject)
+    _builder = _builder.last_update(_now)
+    _builder = _builder.next_update(_now + datetime.timedelta(days=7))
+    # The cryptography CRL builder has NO serial_number() setter - the
+    # CRL's integer rides the CRLNumber EXTENSION alone (RFC 5280 5.2.3).
+    _builder = _builder.add_extension(
+        _x509.CRLNumber(int(_now.timestamp())), critical=False)
+    _builder = _builder.add_extension(
+        _x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+            x509.SubjectKeyIdentifier(ca_ski)), critical=False)
+    _crl = _builder.sign(ca_key, _hashes.SHA256())
+    crl_der = base64.b64encode(_crl.public_bytes(serialization.Encoding.DER)).decode()
+except Exception:
+    crl_der = ""
 
 print(json.dumps({
   "leaf_der_b64": base64.b64encode(leaf.public_bytes(serialization.Encoding.DER)).decode(),
   "ca_pem": ca.public_bytes(serialization.Encoding.PEM).decode(),
   "op_leaf_der_b64": op_leaf_der_b64,
+  "status_der_b64": status_der_b64,
+  "crl_der_b64": crl_der or "",
   "x": x_b64,
   "y": y_b64,
   "kid": kid_mint,
@@ -795,8 +956,38 @@ PYHAIPPEM
   # The PROFILE's issuance leaf: the OP-side (auth-signKeyable) leaf when
   # minted; else the suite's fresh-mint leaf (the legacy shape).
   PROFILE_LEAF_JSON="${OP_LEAF_JSON:-$(printf '%s' "$HAIP_LEAF_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")}"
-  HAIP_CHAIN_JSON="$(printf '%s' "$HAIP_CA_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  # The PROFILE's issuance chain: the status-list signer leaf (the B.9
+  # shape, bound to the SAME auth key) rides FIRST, then the CA - the
+  # CWT x5chain resolves its leaf from the profile's chain members and
+  # the revocation-chain check reads the chain-top issuer (= the CA).
+  HAIP_STATUS_PEM="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "
+import json, sys, base64
+d = json.load(sys.stdin)
+b64 = d.get('status_der_b64', '')
+if not b64:
+    print('')
+else:
+    body = base64.b64encode(base64.b64decode(b64)).decode()
+    print('-----BEGIN CERTIFICATE-----')
+    for i in range(0, len(body), 64):
+        print(body[i:i+64])
+    print('-----END CERTIFICATE-----')
+")"
+  if [ -n "$HAIP_STATUS_PEM" ]; then
+    HAIP_CHAIN_JSON="$(printf '%s
+%s' "$HAIP_STATUS_PEM" "$HAIP_CA_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  else
+    HAIP_CHAIN_JSON="$(printf '%s' "$HAIP_CA_PEM" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")"
+  fi
   ATTESTATION_FIELDS="${ATTESTATION_FIELDS},\"issuance_leaf_pem\":${PROFILE_LEAF_JSON},\"issuance_chain_pem\":${HAIP_CHAIN_JSON}"
+  # The rig CA's CRL (9a.19x): the profile's issuance-CRL member - the OP
+  # serves the DER at /oauth/credentials/issuance-crl (the DS + status
+  # leaves' CRLDP target; the suite's issuer-match demands the rig CA's
+  # signature). Empty (no CRL minted) keeps the member off the PUT.
+  HAIP_CRL_B64="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('crl_der_b64',''))")"
+  if [ -n "$HAIP_CRL_B64" ]; then
+    ATTESTATION_FIELDS="${ATTESTATION_FIELDS},\"issuance_crl_der_b64\":\"$HAIP_CRL_B64\""
+  fi
   HAIP_CA_PEM_EXPORTED="$HAIP_CA_PEM"
   HAIP_LEAF_DER_B64_EXPORTED="$HAIP_LEAF_DER_B64"
   HAIP_ISSUER_XY_EXPORTED="$(echo "$HAIP_ISSUANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['kid'], d['x'], d['y'])")"
@@ -1073,6 +1264,7 @@ echo "attester_pem(vciatt)=$VCIATT_PEM" >> "$SEED_OUT"
 # The RICAL rides the seed-out as ONE std-base64 line (the COSE_Sign1
 # bytes - no newlines; the spec regex reads it whole).
 [ -n "${HAIP_RICAL_B64_EXPORTED:-}" ] && echo "rical_b64(rical)=$HAIP_RICAL_B64_EXPORTED" >> "$SEED_OUT"
+[ -n "${HAIP_CRL_B64:-}" ] && echo "crl_der_b64(issuance)=$HAIP_CRL_B64" >> "$SEED_OUT"
 echo "attestation_issuer(vciatt)=${ATTESTATION_ISSUER:-https://vci-attester.conformance-local}" >> "$SEED_OUT"
 
 # ── CLAIMS-B seed-out lines (sentin8-auth-oidf README, Category-B) ──
@@ -1269,7 +1461,7 @@ VCI_PUB1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json
 VCI_PUB2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['pub2']))")
 VCI_PRIV1=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p1']))")
 VCI_PRIV2=$(echo "$VCI_KEYS" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['p2']))")
-VCI_SCOPE='openid profile email offline_access credential:VerifiedPersonCredential credential:VerifiedEmployeeCredential eudi.pid.1 eudi.pid.1.nobinding eudi.pid.1.attestation eudi.pid.1.jwt.keyattest eudi.pid.1.attestation.keyattest eudi.pid.1.jwt_and_attestation.keyattest openid.example.cert.1'
+VCI_SCOPE='openid profile email offline_access credential:VerifiedPersonCredential credential:VerifiedEmployeeCredential eudi.pid.1 eudi.pid.1.nobinding eudi.pid.1.attestation eudi.pid.1.jwt.keyattest eudi.pid.1.attestation.keyattest eudi.pid.1.jwt_and_attestation.keyattest openid.example.cert.1 eudi.pid.mdoc.1'
 VCI_JSON="$(dcr "cert-vci" "\"token_endpoint_auth_method\":\"private_key_jwt\",\"jwks\":$VCI_PUB1,\"scope\":\"$VCI_SCOPE\",\"consent_required\":true")"
 # client2 registers BOTH forms: the AddRedirectUriQuerySuffix cell presents
 # <callback>?dummy1=lorem&dummy2=ipsum and the suite asserts the suffixed uri

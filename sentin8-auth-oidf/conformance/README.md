@@ -170,6 +170,23 @@ away, which is a coverage hole with the same priority as a failure (auth
 DESIGN §9a.10). Export each run's logs (JSON + log-detail.html) into
 `.tmp/conformance/results/`.
 
+### 4b. The VCI family seats (battery table extract)
+
+The battery's VCI families run the FULL catalog cell matrix per
+certification catalog (OIDF-VCIMDOC-1, auth DESIGN §9a.19x):
+
+| Family (family key) | Plan | Cells |
+|---|---|---|
+| `vci-issuer` (cert-vci) | `oid4vci-1_0-issuer-test-plan` | sd_jwt_vc x 14 module-variants |
+| `vci-haip` (cert-haip) | `oid4vci-1_0-issuer-haip-test-plan` | `credential_format` (sd_jwt_vc, mdoc) x flow (wallet_initiated, issuer_initiated) - 6 plans |
+| `vci-wallet` (cert-wallet) | `oid4vci-1_0-wallet-test-plan` + `oid4vci-1_0-wallet-haip-test-plan` | plain plan + HAIP campaign: format (sd_jwt_vc, mdoc) x flow (wallet, issuer_initiated by_value/by_reference) - 6 HAIP plans (the mdoc cells need `WALCERT_HOLDER_URL` - campaign mode) |
+| `oid4vp-wallet` (cert-vpw) | `oid4vp-1final-wallet-haip-test-plan` | `credential_format` (sd_jwt_vc, iso_mdl) x response mode (direct_post.jwt, dc_api.jwt) |
+
+The mdoc cells' trust anchor is the SUITE's own IACA root
+(`/mdoc-iaca-root.pem`, fetched live at plan-create time); the
+registered clients carry the mdoc configuration scope
+(`eudi.pid.mdoc.1`).
+
 ## 5. CIBA ping connectivity (local)
 
 The suite's ping callback lives inside its docker network. For local
