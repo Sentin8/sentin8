@@ -85,6 +85,7 @@ space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-flutter build-one clean start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
+	ingress-port \
 	core-up core-down core-logs core-status \
 	conformance-up conformance-down conformance-purge conformance-seed \
        conformance-seed-all conformance-all conformance-hosted \
@@ -180,6 +181,64 @@ clean: ## Clean every child repo (target/, build artifacts, local .run/.tmp)
 # the Makefile never sets it.
 PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:stat,sentin8:secrets,sentin8:sign,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
 
+# Ingress bind precondition (PORTBIND-1, packaging DESIGN §4.1). The proxy
+# binds :443 (and the ACME :80 listener when SENTIN8_PROXY_HTTP_PORT is
+# set) as the unprivileged user running this shell. Linux refuses ports
+# below `net.ipv4.ip_unprivileged_port_start` with EACCES; the kernel
+# default is 1024, so a fresh dev host would fail at bind with an opaque
+# error long after the boot started. Fail here, before spawning anything,
+# and print the exact remedy.
+#
+# The packaged deployment does NOT need this: its unit grants the
+# capability (AmbientCapabilities=CAP_NET_BIND_SERVICE). The appliance does
+# not need it either (its container starts as root). This is the source/dev
+# path only, where cargo produces a new inode per build so a `setcap`
+# xattr cannot survive - machine policy is the correct mechanism here.
+# The lowest port the ingress actually needs: :443 always, plus the ACME
+# :80 challenge listener when the operator enabled it (the env file wins
+# over the shell so the advice matches what the fleet will bind).
+INGRESS_ENV_HTTP_PORT = $(shell grep -h '^SENTIN8_PROXY_HTTP_PORT=' ../.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')
+INGRESS_HTTP_PORT = $(or $(SENTIN8_PROXY_HTTP_PORT),$(INGRESS_ENV_HTTP_PORT))
+INGRESS_LOWEST_PORT = $(if $(filter-out 0,$(INGRESS_HTTP_PORT)),$(INGRESS_HTTP_PORT),443)
+define ingress_port_check
+if [ -r /proc/sys/net/ipv4/ip_unprivileged_port_start ]; then \
+	floor=$$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start); \
+	if [ "$$floor" -gt $(INGRESS_LOWEST_PORT) ]; then \
+		echo "ERROR: this host refuses to bind ports below $$floor (net.ipv4.ip_unprivileged_port_start)," >&2; \
+		echo "       but the ingress needs :$(INGRESS_LOWEST_PORT). Grant it for this session and persist:" >&2; \
+		echo "         sudo sysctl -w net.ipv4.ip_unprivileged_port_start=$(INGRESS_LOWEST_PORT)" >&2; \
+		echo "         echo 'net.ipv4.ip_unprivileged_port_start=$(INGRESS_LOWEST_PORT)' | sudo tee /etc/sysctl.d/99-sentin8-ingress.conf" >&2; \
+		echo "       (or let make do both: make ingress-port)" >&2; \
+		echo "       (packaged hosts need nothing - the unit grants CAP_NET_BIND_SERVICE; packaging DESIGN §4.1)" >&2; \
+		exit 1; \
+	fi; \
+fi
+endef
+
+# The same remedy as a target: grant the ingress its low ports on THIS dev
+# host. One sudo prompt applies the live value and the persistent drop-in,
+# so `make start` works now and after a reboot. The value is the lowest port
+# the fleet will actually bind (443, or 80 when the ACME challenge listener
+# is enabled) - derived from .env like the check above, never hardcoded.
+# Deliberately an explicit target, never an implicit step of `make start`:
+# a boot must not escalate privileges on its own.
+# Packaged hosts do not need this (the unit grants CAP_NET_BIND_SERVICE).
+ingress-port: ## Dev host: allow the ingress low ports (sudo sysctl + persistent drop-in)
+	@if [ ! -r /proc/sys/net/ipv4/ip_unprivileged_port_start ]; then \
+		echo "This kernel has no ip_unprivileged_port_start - nothing to do."; exit 0; \
+	fi; \
+	floor=$$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start); \
+	if [ "$$floor" -le $(INGRESS_LOWEST_PORT) ]; then \
+		echo "OK: this host already binds ports below $$floor, so the ingress can hold :$(INGRESS_LOWEST_PORT)."; \
+		exit 0; \
+	fi; \
+	echo "→ granting ports below $(INGRESS_LOWEST_PORT) - sudo password required"; \
+	sudo sysctl -w net.ipv4.ip_unprivileged_port_start=$(INGRESS_LOWEST_PORT) >/dev/null || exit 1; \
+	printf '%s\n' 'net.ipv4.ip_unprivileged_port_start=$(INGRESS_LOWEST_PORT)' \
+		| sudo tee /etc/sysctl.d/99-sentin8-ingress.conf >/dev/null || exit 1; \
+	echo "→ persisted to /etc/sysctl.d/99-sentin8-ingress.conf (survives reboot)"; \
+	echo "→ active floor: $$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start)"
+
 infra-up: ## Dev infra plane: compose up (postgres + valkey; fresh volumes = fresh initdb)
 	@if [ ! -f ../.run/secrets/infra-tls/postgres-server.crt ]; then \
 		echo 'infra-tls material missing - running make infra-tls first'; \
@@ -195,6 +254,7 @@ infra-down: ## Dev infra plane: compose down (volumes KEPT; infra stays warm)
 
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
+	@$(call ingress_port_check)
 	@if docker inspect sentin8core-machine >/dev/null 2>&1 && \
 	   [ "$$(docker inspect -f '{{.State.Running}}' sentin8core-machine 2>/dev/null)" = "true" ]; then \
 		echo 'ERROR: the core appliance is running (make core-up).' >&2; \
@@ -450,6 +510,7 @@ conformance-domain-public: ## Rig domain mode: tier split - internal plane platf
 # below keeps whatever ../.env declares (production posture).
 start-conformance: ## Start the platform fleet in the rig posture (classical TLS + FAPI ciphers + self-signed client certs)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
+	@$(call ingress_port_check)
 	@$(MAKE) --no-print-directory infra-up
 	@export SENTIN8_CAPTAIN_BINARY_PREFIX="$(BINARY_PREFIX)"; \
 	export SENTIN8_TLS_PQ_MODE=classical; \
