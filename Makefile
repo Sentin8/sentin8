@@ -85,7 +85,7 @@ space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-flutter build-one clean start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
-	ingress-port \
+	ingress-port ca-tls ca-trust ca-untrust ca-trust-status \
 	core-up core-down core-logs core-status \
 	conformance-up conformance-down conformance-purge conformance-seed \
        conformance-seed-all conformance-all conformance-hosted \
@@ -313,6 +313,27 @@ ca-tls: ## Ensure the CA root + intermediate per PQ mode (default: active; MODES
 	./sentin8-acme/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-acme \
 		--ensure-ca \
 		$(if $(MODES),--modes=$(MODES))
+
+# CATRUST-1 (acme DESIGN §4.0b): publish the platform CA into the system
+# trust store. Installs ALL THREE families' root + intermediate so a
+# posture flip needs no re-install; every anchor filename carries its
+# family, because the classical/hybrid/exclusive CAs are unrelated
+# authorities and an unnamespaced anchor cannot be told apart across
+# postures (the script deletes the legacy unnamespaced names). One file
+# per certificate - Debian copies files verbatim and never splits the
+# two-cert acme-ca/root-ca.crt bundle. sudo once for the anchor dir.
+CA_TRUST_MODES ?=
+ca-trust: ## Install the platform CA (all 3 families' root+intermediate) into the system + NSS trust stores
+	@set -a; . ../.env; set +a; \
+	sudo -E ./sentin8-acme/scripts/ca-trust.sh install $(CA_TRUST_MODES)
+
+ca-untrust: ## Remove every Sentin8 CA from the system + NSS trust stores
+	@set -a; . ../.env; set +a; \
+	sudo -E ./sentin8-acme/scripts/ca-trust.sh uninstall
+
+ca-trust-status: ## Show which Sentin8 CAs are installed (no privilege needed)
+	@set -a; . ../.env; set +a; \
+	./sentin8-acme/scripts/ca-trust.sh status
 
 # The dev split-plane: the platform CORE (postgres + valkey + one machine
 # container running captain + the 17 services) in a SECOND compose project,
