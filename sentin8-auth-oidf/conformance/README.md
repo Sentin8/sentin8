@@ -32,74 +32,47 @@
   `make infra-tls` once before the first `conformance-up` if the
   material is missing.
 
-## 1b. Rig domain mode (RIGMODE-1)
+## 1b. Rig issuance mode (RIGMODE-3)
 
-The OP hostname under the rig is a make selection (auth DESIGN
-9a.2 item 2c) - no `.env` edit:
+The rig does **not** select a domain. `SENTIN8_DOMAIN` comes from the
+tree `.env` like every other variable, because a different domain means a
+different CA, different enrolled hostnames, and different issued leaves -
+a full fleet reset, never an override.
+
+What the rig selects is the **certificate issuer**, which a test run
+legitimately changes without touching identity. **All-local is the
+default** - a rig starts on the platform CA and an upstream run is a
+deliberate opt-in:
 
 ```bash
-make conformance-domain-local                            # loopback wildcard (default)
-CONFORMANCE_DOMAIN=oidf.sentin8.dev \
-  make conformance-domain-platform                       # real domain, platform CA
-CONFORMANCE_DOMAIN=real.domain.example \
-  CONFORMANCE_ACME_UPSTREAM_URL=https://acme-staging-v02.api.letsencrypt.org/directory \
-  make conformance-domain-public                         # real domain, upstream CA
+make conformance-acme-internal      # DEFAULT: platform CA for everything
+
+CONFORMANCE_ACME_UPSTREAM_URL=https://acme-staging-v02.api.letsencrypt.org/directory \
+  make conformance-acme-upstream    # opt-in: declared externals relay upstream
 ```
 
 The chosen target writes `conformance/domain.env` (repo root, gitignored)
-- the ONE override block every rig consumer reads: `start-conformance`
-sources it after `.env` (so it wins), the seed/generator derive the
-tenant hosts from it, and `conformance-up` regenerates the suite
-container's family `extra_hosts` from it. After a mode change, restart
-the fleet (leaf caches are hostname-scoped): `make stop &&
-make conformance-up`.
+- the ONE override block every rig consumer reads, sourced by
+`start-conformance` **after** `.env`. It never contains `SENTIN8_DOMAIN`;
+`start-conformance` refuses to boot if it does.
 
-| Mode | `SENTIN8_DOMAIN` | Leaf issuer | Publicly resolvable |
+After changing the issuer, restart the fleet (leaf caches are
+hostname-scoped and source-filtered): `make stop && make conformance-up`.
+
+| Mode | `SENTIN8_ACME_FORCE_INTERNAL` | Upstream | Leaf issuer |
 |---|---|---|---|
-| `local` | `local.sentin8.dev` | platform CA (HTTP-01 short-circuit) | resolves to 127.0.0.1 |
-| `platform` | operator domain (wildcard zone → the box) | platform CA | yes |
-| `public` | operator domain | upstream CA via acme's relay | yes, port 80 open |
+| `internal` (**default**) | `true` | none | platform CA for every hostname |
+| `upstream` | `false` | LE staging directory | upstream for enrolled `external` names, platform CA otherwise |
 
-### 1c. Ingress reachability - when a mode actually needs the internet path
+The shipped `.env.example` also defaults to `FORCE_INTERNAL=true`, so a
+box that never thinks about the issuer gets the platform CA and builds no
+upstream client at all.
 
-The three modes differ in what must reach this box from OUTSIDE:
+**Never point `CONFORMANCE_ACME_UPSTREAM_URL` at production Let's
+Encrypt.** Production allows 50 certificates per registered domain per
+week, and one battery can consume that in a single pass. `make captain
+services` shows the configured issuer under `Infrastructure:`.
 
-| Mode | Who connects from outside | Inbound requirement |
-|---|---|---|
-| `local` | none - everything runs on this box | none |
-| `platform` | none for the campaign (browser, suite server, CLI, seed are all local) | none for the rig; only a REMOTE human browser testing `https://auth...` needs it |
-| `public` | the upstream CA's http-01 validator (port 80) | REQUIRED - the challenge never arrives otherwise and orders time out |
-
-On a WSL2 dev box the internet path has an extra hop the platform
-cannot provision itself (Windows-side, one-time, elevated PowerShell):
-
-```
-internet -> router(public IP) -> Windows host(LAN IP) --portproxy--> WSL2 VM -> sentin8-proxy
-```
-
-The router forwards `*.oidf.sentin8.dev`'s ports to the Windows LAN
-IP; WSL2 sits behind the Windows NAT, so the last hop needs a `netsh
-portproxy` - and because the WSL2 VM IP changes on every WSL restart,
-a static one dies silently. `scripts/windows/wsl-portproxy.ps1` (in the group
-tree) reconciles the forwarding to the live IP:
-
-```powershell
-# one-time install (also copies itself to C:\Scripts and registers the
-# logon + 5-minute refresh task):
-powershell -ExecutionPolicy Bypass -File scripts\windows\wsl-portproxy.ps1 -RegisterTask
-
-# verify from the WSL side (hits the Windows host directly - no hairpin):
-#   echo | openssl s_client -connect <windows-LAN-IP>:443 \
-#     -servername auth.cert.conformance-local.oidf.sentin8.dev | openssl x509 -noout -subject
-```
-
-The script listens on `0.0.0.0:80,443`, deletes only its OWN stale
-rows (our ports + a WSL-range connect address), keeps the firewall
-rule idempotent, and logs to
-`C:\ProgramData\sentin8\wsl-portproxy.log`. Verify the LAST hop
-externally with a public port-checker on the public IP (an in-box
-hairpin probe fails regardless - it egresses and has no shortcut
-back; do not trust its verdict).
 
 ## 2. Start the suite
 
