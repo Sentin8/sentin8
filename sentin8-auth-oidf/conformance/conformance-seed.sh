@@ -63,14 +63,21 @@ ORG_SLUG="conformance-local"
 TREE_ROOT="$(cd "$ROOT/.." && pwd)"
 # The mode file: the GROUP root's conformance/domain.env (where the make
 # targets write), then an in-repo copy, then the tree-root .env.
+# NOTE the `|| true`: under `set -e`, a `grep -m1` with NO match fails the
+# whole script - and RIGMODE-3 REQUIRES the mode file to omit SENTIN8_DOMAIN
+# (the rig selects the issuer, never the domain; `make start-conformance`
+# refuses a mode file that carries one). So the very condition this loop is
+# written to support killed the script silently, before the tree-.env
+# fallback was ever reached: `make conformance-seed` exited 1 with no output
+# at all. "No domain in this file" is a normal, expected answer here.
 for MODE_FILE in "$ROOT/conformance/domain.env" "$(dirname "$0")/domain.env"; do
   if [ -n "${DOMAIN_SUFFIX:-}" ]; then break; fi
   if [ -f "$MODE_FILE" ]; then
-    DOMAIN_SUFFIX="$(grep -m1 '^SENTIN8_DOMAIN=' "$MODE_FILE" | cut -d= -f2 | tr -d '"' | tr -d ' ')"
+    DOMAIN_SUFFIX="$(grep -m1 '^SENTIN8_DOMAIN=' "$MODE_FILE" | cut -d= -f2 | tr -d '"' | tr -d ' ' || true)"
   fi
 done
 if [ -z "$DOMAIN_SUFFIX" ] && [ -f "$TREE_ROOT/.env" ]; then
-  DOMAIN_SUFFIX="$(grep -m1 '^SENTIN8_DOMAIN=' "$TREE_ROOT/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ')"
+  DOMAIN_SUFFIX="$(grep -m1 '^SENTIN8_DOMAIN=' "$TREE_ROOT/.env" | cut -d= -f2 | tr -d '"' | tr -d ' ' || true)"
 fi
 DOMAIN_SUFFIX="${DOMAIN_SUFFIX:-local.sentin8.dev}"
 [ -n "$DOMAIN_SUFFIX" ] || { echo "[conformance-seed] no SENTIN8_DOMAIN found (mode file + tree .env both silent)" >&2; exit 1; }
