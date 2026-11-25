@@ -151,6 +151,120 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ── pgAdmin 4 (operator database console) ─────────────────────────────
+  # A web UI in front of the SAME PostgreSQL instance - a convenience
+  # plane, never a data plane. It reads through the `m2m-postgres-ops`
+  # client identity, which the pg_ident map already binds to the `sentin8`
+  # DDL/operator role, so no new role, password, or HBA line is introduced.
+  #
+  # WHY A CLIENT CERTIFICATE IS THE ONLY WAY IN: pg_hba.conf has NO
+  # `host`/`md5`/`scram` line for external hosts - every TCP connection is
+  # `hostssl ... cert map=pgm clientcert=verify-full`. pgAdmin therefore
+  # cannot log in with a password at all; it must present
+  # `postgres-ops.crt`/`.key` and trust the platform CA. Both are mounted
+  # read-only from the SAME infra-tls material the host CLI uses, so the
+  # console is exactly as privileged as `sentin8-cli` running on the host -
+  # no more.
+  #
+  # TRANSPORT: pgAdmin talks to postgres over the compose network by
+  # SERVICE NAME (`postgres`), which is what the server leaf's SAN list
+  # must carry for `verify-full` to pass. `make infra-up` therefore calls
+  # `make infra-tls INFRA_SANS=postgres,valkey`; the SAN-coverage contract
+  # (`leaf_covers_sans`) re-mints an existing leaf that lacks them, so a
+  # tree booted before this service existed converges on the next
+  # `make infra-up` without a manual `down -v`.
+  #
+  # BOUND TO LOOPBACK: the console exposes a full SQL console over the
+  # whole platform database, so it is published on 127.0.0.1 only - it is
+  # never reachable from the network, and it is not routed through the
+  # ingress (no hostname, no CA leaf, no DNS name).
+  #
+  # Disable with `PGADMIN_DISABLE=1` or `docker compose up -d postgres
+  # valkey` (the explicit form `make infra-up` used before this existed).
+  pgadmin:
+    # Pinned minor-free major tag: pgAdmin 9 is the release that dropped
+    # Python 3.8 and ships a current Werkzeug - `latest` would drift.
+    image: dpage/pgadmin4:9
+    container_name: sentin8-pgadmin
+    profiles: ["pgadmin"]
+    # ── CONSOLE SIGN-IN: platform SSO, not a static password ──────────
+    # pgAdmin's default is `AUTHENTICATION_SOURCES = ['internal']`, i.e. a
+    # static login baked into env. The platform does not work that way -
+    # operators are Sentin8:Auth users, and their identity comes from an
+    # OIDC authorization-code round trip.
+    #
+    # There is NO static console password and NO hardcoded domain here.
+    # Both come from `infra/pgadmin/pgadmin-oidc-login.sh`, which reads
+    # SENTIN8_DOMAIN from the tree-root `.env`, performs Dynamic Client
+    # Registration (RFC 7591) against that fleet's auth, and writes
+    # `/etc/pgadmin/config_system.py` - the LAST layer pgAdmin loads
+    # (evaluate_config.py loads config_distro, then config_local, then
+    # config_system), so it wins over anything the image ships.
+    #
+    # pgAdmin's users are auto-created from the OIDC `email` claim on
+    # first sign-in (OAUTH2_AUTO_CREATE_USER + the username claim), so no
+    # local account has to pre-exist.
+    environment:
+      # SERVER_MODE must be TRUE for SSO to exist at all: pgAdmin only
+      # registers the oauth2 auth module inside `if config.SERVER_MODE`
+      # (pgadmin/authenticate/registry.py load_modules) - in desktop mode
+      # it silently loads `internal` only, the OAuth2 routes 404, and the
+      # static password is the only way in. That is the exact opposite of
+      # what this console needs.
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+      # No telemetry, no update checks: this box is often offline.
+      PGADMIN_CONFIG_UPGRADE_CHECK_ENABLED: "False"
+      PGADMIN_CONFIG_GRAVATAR_URL: "''"
+      # Users arrive through OIDC; let pgAdmin create them on first login.
+      PGADMIN_CONFIG_OAUTH2_AUTO_CREATE_USER: "True"
+      # The console is loopback-only and the DATABASE credential is a
+      # certificate, so a second master-password prompt adds nothing.
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      # pgAdmin's OIDC client validates the auth server with requests +
+      # certifi, which knows nothing of the platform CA - the discovery
+      # fetch would fail with "self-signed certificate in certificate
+      # chain" and the SSO button would 500. `make infra-pgadmin` writes a
+      # bundle (certifi + this fleet's root & intermediate) and these two
+      # point both requests and OpenSSL at it.
+      REQUESTS_CA_BUNDLE: /ca-bundle/ca-bundle.pem
+      SSL_CERT_FILE: /ca-bundle/ca-bundle.pem
+    ports:
+      # Loopback-only by construction (see the note above).
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - sentin8-pgadmin:/var/lib/pgadmin
+      # The m2m-postgres-ops pair (the operator identity the pg_ident map
+      # binds to role `sentin8`) + the public CA chain it must trust.
+      # DIRECTORY mounts, matching the postgres service: the infra-tls
+      # rewrite replaces inodes, and a single-file bind would pin the old
+      # one.
+      - ../.run/secrets/infra-tls:/certs:ro
+      - ../.run/secrets/acme-ca:/ca:ro
+      # The generated SSO config (AUTHENTICATION_SOURCES + OAUTH2_CONFIG
+      # built from this tree's domain and the DCR result) and the CA
+      # bundle its OIDC client trusts. Written by `make infra-pgadmin`; the
+      # directory is gitignored runtime state.
+      - ../.run/pgadmin:/etc/pgadmin:ro
+      - ../.run/pgadmin:/ca-bundle:ro
+      # Pre-registers the fleet server (certificate + verify-full) so the
+      # console opens on the database instead of an empty server list.
+      # pgAdmin reads this ONLY on first boot (when the pgadmin volume is
+      # empty); editing it later needs `docker compose rm -f pgadmin` plus
+      # a volume wipe. `make infra-reset-pgadmin` does both.
+      - ./infra/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # /misc/ping is unauthenticated and returns 200 once gunicorn is up.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:80/misc/ping || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   sentin8-pgdata:
   sentin8-valkeydata:
+  sentin8-pgadmin:

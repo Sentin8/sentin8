@@ -243,14 +243,58 @@ infra-up: ## Dev infra plane: compose up (postgres + valkey; fresh volumes = fre
 	@if [ ! -f ../.run/secrets/infra-tls/postgres-server.crt ]; then \
 		echo 'infra-tls material missing - running make infra-tls first'; \
 		$(MAKE) --no-print-directory infra-tls; \
+	else \
+		$(MAKE) --no-print-directory infra-tls INFRA_SANS=postgres,valkey; \
 	fi
 	@for vol in sentin8_sentin8-pgdata sentin8_sentin8-valkeydata; do \
 		docker run --rm -v $$vol:/d alpine chown -R 1000:1000 /d 2>/dev/null || true; \
 	done
 	docker compose up -d postgres valkey
+	@if [ "$${PGADMIN_DISABLE:-0}" != "1" ]; then \
+		$(MAKE) --no-print-directory infra-pgadmin; \
+	fi
+
+# pgAdmin 4 in front of the SAME PostgreSQL (see the pgadmin service's
+# header): a convenience console, loopback-only. Console sign-in is the
+# PLATFORM's SSO - there is no static password and no hardcoded domain.
+# `infra/pgadmin/pgadmin-oidc-login.sh` registers an OIDC client via DCR
+# against this tree's auth (SENTIN8_DOMAIN from the tree-root .env) and
+# writes .run/pgadmin/config_system.py, which pgAdmin loads as its FINAL
+# config layer - that is what replaces AUTHENTICATION_SOURCES=["internal"].
+# Opt out of SSO with PGADMIN_OIDC_DISABLE=1 (the console then cannot sign
+# anyone in; it is a debugging switch, not a fallback).
+infra-pgadmin: ## Dev infra: bring up the pgAdmin 4 console (SSO) on 127.0.0.1:5050
+	@if [ "$${PGADMIN_OIDC_DISABLE:-0}" = "1" ]; then \
+		echo "PGADMIN_OIDC_DISABLE=1 - skipping the SSO registration"; \
+	else \
+		./infra/pgadmin/pgadmin-oidc-login.sh || { \
+			echo "ERROR: pgAdmin SSO registration failed." >&2; \
+			echo "  The console has no static password - without a client nobody can sign in." >&2; \
+			echo "  Is the fleet up (make start) and the CA trusted (make ca-trust)?" >&2; \
+			exit 1; \
+		}; \
+	fi
+	@for vol in sentin8_sentin8-pgadmin; do \
+		docker run --rm -v $$vol:/d alpine:3 chown -R 1000:1000 /d 2>/dev/null || true; \
+	done
+	@port=$${PGADMIN_PORT:-$$(grep -h '^PGADMIN_PORT=' ../.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')}; \
+	echo "→ pgAdmin 4: http://127.0.0.1:$${port:-5050}/  (loopback only - sign in with your Sentin8 account)"
+	docker compose --profile pgadmin up -d --force-recreate pgadmin
+
+infra-pgadmin-sso-reset: ## Dev infra: re-register the console's OIDC client (after a domain/port change)
+	@FORCE=1 ./infra/pgadmin/pgadmin-oidc-login.sh
+	@$(MAKE) --no-print-directory infra-pgadmin
+
+# servers.json is read ONCE, when the pgadmin volume is empty. Changing the
+# pre-registered server (host, cert paths, sslmode) needs this.
+infra-reset-pgadmin: ## Dev infra: wipe pgAdmin state so servers.json is re-read
+	docker compose rm -sf pgadmin 2>/dev/null || true
+	docker volume rm -f sentin8_sentin8-pgadmin 2>/dev/null || true
+	@echo "pgAdmin state wiped - the next 'make infra-pgadmin' re-reads infra/pgadmin/servers.json."
 
 infra-down: ## Dev infra plane: compose down (volumes KEPT; infra stays warm)
-	docker compose stop postgres valkey && docker compose rm -f postgres valkey
+	docker compose --profile pgadmin stop postgres valkey pgadmin \
+		&& docker compose --profile pgadmin rm -f postgres valkey pgadmin
 
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }

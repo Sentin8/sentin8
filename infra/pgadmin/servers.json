@@ -1,0 +1,24 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Sentin8 fleet (postgres)",
+      "Group": "Sentin8",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "sentin8",
+      "Username": "sentin8",
+      "SSLMode": "verify-full",
+      "Comment": "Certificate identity (group DESIGN 3.2): no password. pgAdmin presents the m2m-postgres-ops leaf, which pg_ident maps to role sentin8.",
+      "ConnectionParameters": {
+        "sslcert": "/certs/postgres-ops.crt",
+        "sslkey": "/certs/postgres-ops.key",
+        "sslrootcert": "/ca/root-ca.crt",
+        "sslmode": "verify-full",
+        "host": "postgres",
+        "port": 5432,
+        "dbname": "sentin8",
+        "user": "sentin8"
+      }
+    }
+  }
+}
