@@ -17,7 +17,7 @@
 SHELL := /bin/bash
 CARGO ?= cargo
 
-SERVICES := auth acme proxy bus db storage post stat secrets sign func cron flow ai sys app bff web
+SERVICES := auth acme proxy bus db storage post push stat secrets sign func cron flow ai sys app bff web
 
 # Cargo profile flag: empty = dev/debug (default), --release = release.
 # Set it on the command line (RELEASE=--release make start) or use the
@@ -85,6 +85,7 @@ space := $(empty) $(empty)
 
 .PHONY: help build build-sdk build-starters build-services build-flutter build-one clean start stop status \
 	$(PROFILED:%=%-release) $(PROFILED:%=%-debug) infra-up infra-down enroll test test-openapi heads \
+	lint-fleet-lists \
 	ingress-port ca-tls ca-trust ca-untrust ca-trust-status \
 	core-up core-down core-logs core-status \
 	conformance-up conformance-down conformance-purge conformance-seed \
@@ -128,7 +129,7 @@ build-starters: build-sdk ## Build cli + captain (before any service)
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
 	cd sentin8-captain && $(call stamp_env,sentin8-captain) $(CARGO) build $(RELEASE)
 
-build-services: build-starters ## Build the 17 platform service repos
+build-services: build-starters ## Build the 18 platform service repos
 	@for s in $(SERVICES); do \
 		echo "=== sentin8-$$s ==="; \
 		$(MAKE) --no-print-directory build-one SERVICE=$$s || exit 1; \
@@ -179,7 +180,7 @@ clean: ## Clean every child repo (target/, build artifacts, local .run/.tmp)
 # the start-services list (captain up) or the sentin8-boot allow-list
 # (captain down). The CLI owns the cold-boot `SENTIN8_SERVICES` export —
 # the Makefile never sets it.
-PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:stat,sentin8:secrets,sentin8:sign,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
+PLATFORM_SERVICES := sentin8:captain,sentin8:acme,sentin8:auth,sentin8:sys,sentin8:bus,sentin8:proxy,sentin8:db,sentin8:storage,sentin8:post,sentin8:push,sentin8:stat,sentin8:secrets,sentin8:sign,sentin8:func,sentin8:cron,sentin8:flow,sentin8:ai,sentin8:app,sentin8:bff,sentin8:web
 
 # Ingress bind precondition (PORTBIND-1, packaging DESIGN §4.1). The proxy
 # binds :443 (and the ACME :80 listener when SENTIN8_PROXY_HTTP_PORT is
@@ -384,7 +385,7 @@ infra-tls: ## Materialize the infra TLS material (Valkey + PostgreSQL server lea
 	./sentin8-acme/target/$(if $(filter --release,$(RELEASE)),release,debug)/sentin8-acme \
 		--ensure-infra-tls \
 		$(if $(INFRA_SANS),--infra-sans=$(INFRA_SANS)) \
-                --mint-workloads=sentin8:acme,sentin8:ai,sentin8:app,sentin8:auth,sentin8:bff,sentin8:bus,sentin8:cron,sentin8:db,sentin8:flow,sentin8:func,sentin8:post,sentin8:proxy,sentin8:secrets,sentin8:sign,sentin8:stat,sentin8:storage,sentin8:sys,sentin8:web,wallet8:holder
+                --mint-workloads=sentin8:acme,sentin8:ai,sentin8:app,sentin8:auth,sentin8:bff,sentin8:bus,sentin8:cron,sentin8:db,sentin8:flow,sentin8:func,sentin8:post,sentin8:push,sentin8:proxy,sentin8:secrets,sentin8:sign,sentin8:stat,sentin8:storage,sentin8:sys,sentin8:web,wallet8:holder
 MODES ?=
 ca-tls: ## Ensure the CA root + intermediate per PQ mode (default: active; MODES=a,b,c for specific)
 	@set -a; . ../.env; set +a; \
@@ -525,12 +526,16 @@ enroll: ## Enroll every platform service fragment (derived; bootstraps first whe
 		$(ENROLL_PATHS)
 
 test: ## Run the SDK + starters test suites
+test: lint-fleet-lists
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
 	cd sentin8-sdk && $(call stamp_env,sentin8-sdk) $(CARGO) test --workspace
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
 	cd sentin8-cli && $(call stamp_env,sentin8-cli) $(CARGO) test
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
 	cd sentin8-captain && $(call stamp_env,sentin8-captain) $(CARGO) test
+
+lint-fleet-lists: ## Guard: Makefile build/start lists and the captain catalog must agree
+	@python3 sentin8-cli/scripts/check-fleet-lists.py
 
 test-openapi: ## Run every platform drift-guard test (OAPEC §4.8 — the nightly's router↔spec sweep)
 	@set -a; . ../.env; set +a; export SQLX_OFFLINE=true; \
