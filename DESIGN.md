@@ -495,7 +495,7 @@ worth its own story: `jwks.rs::active_signing_alg()` returns `RS256` when
 `signing_alg='MLDSA65'` and the published JWKS is ML-DSA only. On this
 `classical` fleet the profile overrides the mode-derived default.
 
-##### Resolution
+##### Resolution (open - PGAUTH-2)
 
 **A dedicated console environment does NOT work - identity is env-scoped.**
 The earlier scoping proposed a console env with a relaxed profile. That is
@@ -517,49 +517,64 @@ made the empty `signing_alg` inherit the deployment mode, so on a
 `classical` fleet the id_token is already RS256 and authlib verifies it.
 A relaxed POSTURE no longer implies a PQ token.
 
-**What is required is a registration-scoped posture exemption.** The
-platform already establishes exactly this pattern: `oauth_clients.
-sender_constrain` is documented as "REGISTRATION-SCOPED, not env-scoped",
-and `oauth_clients.dpop_exempt` waives a profile gate for ONE
-first-party client.
+**The PAR mandate is NOT a defect.** An earlier reading concluded PAR was
+unreasonable because the seeded `dash` client appeared to be rejected by
+`GET /oauth/authorize`. That reading tested the wrong entry point: `dash`
+never calls the bare authorize endpoint. Its BFF builds the URL through
+the platform FAPI client (`sentin8::auth::fapi::Client::authorize_url`),
+which pushes the request with PAR and redirects with `request_uri`. `dash`
+has never failed. The PAR mandate stands.
 
-##### Implemented resolution (PGAUTH-2)
+**A registration-scoped exemption was implemented and then REVERTED.**
+`oauth_clients.par_exempt` (plus a provision route and two gate waivers)
+shipped under this story and was withdrawn: it relaxed the default
+authorization posture for one client based on a misreading, and the
+platform already owns a fully FAPI-capable RP. There is no exemption
+column, no provision route, and no gate waiver.
 
-`oauth_clients.par_exempt` (BOOLEAN, DEFAULT false) is the registration-
-scoped PAR exemption. It is consulted at exactly two gates:
+**The target state is a forward-auth front built on the platform's own
+FAPI client.** pgAdmin ships a `webserver` authentication source designed
+exactly for this shape:
 
-| Gate | Site | Exempt behaviour |
-|---|---|---|
-| PAR mandate | `authorize` (`missing_par`) | the reject is skipped for this client |
-| FAPI auth-method allow-list | token mint (`is_auth_method_allowed`) | the console's credential shape is admitted |
+```
+AUTHENTICATION_SOURCES = ['webserver']
+WEBSERVER_REMOTE_USER       = 'REMOTE_USER'
+WEBSERVER_TRUSTED_PROXIES   = [<front's address/CIDR>]
+WEBSERVER_SHARED_SECRET     = <per-tree secret>
+WEBSERVER_SHARED_SECRET_HEADER = 'X-Pgadmin-Webserver-Secret'
+```
 
-Only PAR and the auth-method allow-list are waived, because only those
-two are genuinely impossible for the console:
+pgAdmin's module already refuses `HTTP_`-prefixed or hyphenated header
+names (so `X-Forwarded-User` cannot be forged), checks the raw socket peer
+against the trusted-proxy list, and compares the shared secret with
+`hmac.compare_digest`. The front therefore holds the whole OIDC handshake
+and pgAdmin holds no OIDC client at all.
 
-| Gate | Console capability | Verdict |
-|---|---|---|
-| PAR (`require_par`) | authlib 1.9.1 carries no pushed-request helper | waived |
-| auth method (FAPI allow-list) | the console holds a client secret, which `fapi_2` rejects | waived |
-| JARM (`require_jarm`) | only wraps when `response_mode=jwt`, which the console never sends | untouched |
-| DPoP (`require_dpop`) | already waived by `dpop_exempt` for a public client | untouched |
-| PKCE (`require_pkce`) | pgAdmin supports it (`OAUTH2_CHALLENGE_METHOD=S256`) | stays REQUIRED |
-| `require_iss` | the console ignores the extra `iss` parameter | untouched |
+The front must do PAR + PKCE. `fapi_2` also restricts the token-endpoint
+client auth method to `none` | `tls_client_auth` |
+`self_signed_tls_client_auth` | `private_key_jwt` | attestation - a shared
+secret is NOT among them. The platform's FAPI client already speaks PAR,
+DPoP, JAR/JARM and `tls_client_auth`, so it satisfies the posture with no
+exemption.
 
-Hardening, mirroring `dpop_exempt`:
+Third-party front-ends do NOT fit: oauth2-proxy has no PAR, DPoP or
+`private_key_jwt` support (it does PKCE only); Keycloak Gatekeeper/Louketo
+is archived; Kong and Envoy ship no FAPI RP. Any of them would fail at the
+same gate pgAdmin failed at.
 
-- **Not settable through DCR.** The flag has no `RegisterRequest` member,
-  so a self-registered client can never relax the posture it is judged by.
-- **Written only by a privileged surface.**
-  `POST /v1/admin/provision/oauth_client_exempt` requires the
-  provisioning scope, targets an EXISTING client, and flips flags - it
-  never creates one.
-- **Named gates only.** The exemption does not disable the posture; it
-  names PAR and the auth-method allow-list, so a future posture flag is
-  not silently inherited.
+##### Open questions
 
-Verified live on the `classical` dev fleet: the exempt console client
-authorize returns `302 -> /sign-in` (proceed) while the non-exempt `dash`
-client still returns the `PAR is required` error redirect.
+1. **Where the front runs.** A separate local process next to pgAdmin
+   (simplest, keeps pgAdmin's loopback-only posture) versus an extension
+   of an existing platform surface. The platform has no generic
+   forward-auth today (`sentin8-proxy` is an SNI/L7 router and
+   `AUTHENTICATION_SOURCES=['webserver']` needs a peer it can trust).
+2. **Role mapping.** pgAdmin's webserver source auto-creates a local row
+   with `role: 2`, which is not Administrator. Whether operators should
+   land as pgAdmin administrators is a policy decision, not a technical
+   one.
+3. **Secret distribution.** The shared secret is per-tree runtime state,
+   so it belongs beside the other generated material under `.run/`.
 
 ##### Invariants
 
@@ -571,6 +586,9 @@ client still returns the `PAR is required` error redirect.
    state), never in a tracked file.
 4. The console is reachable only on host loopback; it is never routed
    through the ingress.
+5. The console never relaxes a security posture. If the console cannot
+   satisfy the fleet's posture, the front satisfies it on the console's
+   behalf.
 
 ### 3.3 The core appliance profile (COREAP - dev/test split-plane)
 
