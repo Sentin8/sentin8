@@ -228,6 +228,20 @@ services:
       # point both requests and OpenSSL at it.
       REQUESTS_CA_BUNDLE: /ca-bundle/ca-bundle.pem
       SSL_CERT_FILE: /ca-bundle/ca-bundle.pem
+    # ── ROUTE THE AUTH HOST OUT OF THE CONTAINER ──────────────────────
+    # The SSO round trip straddles two resolution worlds. The BROWSER (on
+    # the host) follows the dev wildcard `*.local.sentin8.dev -> 127.0.0.1`
+    # and reaches the ingress correctly. The CONTAINER gets the same
+    # 127.0.0.1 answer, which is its OWN loopback - so the server-side half
+    # of the exchange (token, userinfo, discovery) is refused.
+    #
+    # This entry points the auth host at the docker host gateway, where the
+    # ingress listens on :443. It is rendered from the SAME SENTIN8_DOMAIN
+    # the DCR script used, in REQUIRED form: a compose run without the
+    # domain fails loudly instead of emitting a hostless entry that fails
+    # at sign-in (DESIGN §3.2.5).
+    extra_hosts:
+      - "auth.ops.sys.${SENTIN8_DOMAIN:?SENTIN8_DOMAIN must be set - pass --env-file ../.env}:host-gateway"
     ports:
       # Loopback-only by construction (see the note above).
       - "127.0.0.1:${PGADMIN_PORT:-5050}:80"

@@ -35,6 +35,7 @@
 | Self-healing boot | `make start` (provision-on-boot) | A reset never leaves the platform half-provisioned: the boot the operator already runs converges every service's identity rows automatically |
 | Stable UI delivery | `make build` + served Flutter bundles | The sign-in/admin UI never silently disappears between resets - missing bundles are rebuilt or named loudly at boot |
 | One instance per service | captain duplicate-instance sweep | The ingress can never round-robin a healthy and a broken copy of the same service - the fleet self-converges |
+| Operator database console | pgAdmin 4 (`make infra-pgadmin`) | Developers inspect the platform database through a browser console, signed in with the same platform account they use everywhere else - no second password to manage |
 
 ## 3. What the Group Does NOT Own
 

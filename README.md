@@ -52,6 +52,25 @@ make start         # cold boot: provision-on-boot converges the platform
 (provision-on-boot, CLI DESIGN §4.2), so identity rows survive any reset
 without remembering to enroll each repo.
 
+### Optional: the pgAdmin console
+
+`make infra-up` also brings up a loopback-only pgAdmin 4 at
+`http://127.0.0.1:5050/` (skip it with `PGADMIN_DISABLE=1`). Sign-in is
+platform SSO - there is no static console password. Its OAuth client is
+minted by Dynamic Client Registration against this tree's auth, and every
+URL it uses derives from `SENTIN8_DOMAIN` in the tree-root `.env`.
+
+```bash
+make infra-pgadmin              # (re)configure SSO + start the console
+make infra-pgadmin-sso-reset    # re-register after a domain or port change
+make infra-reset-pgadmin        # wipe console state (re-reads servers.json)
+```
+
+The generated state lives under `.run/pgadmin/` and is gitignored. It is
+revalidated on every run: a stored client is reused only when its recorded
+domain/redirect still match AND the recorded issuer still answers discovery
+- otherwise it is re-registered. Design: `DESIGN.md` §3.2.5.
+
 A single-repo team never needs this folder's Makefile - clone e.g.
 `sentin8-auth` alone; `cargo build` fetches the SDK pin and builds. Vertical
 groups are built from their own group folders; vertical services ride the

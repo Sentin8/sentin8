@@ -23,9 +23,12 @@
 # `.env` (or an explicit SENTIN8_DOMAIN), and a missing one fails HERE rather
 # than silently pointing the console at a fleet that does not exist.
 #
-# It is idempotent per (domain, redirect URI): an existing registration is
-# reused, so repeated `make infra-pgadmin` runs cost nothing. A domain or
-# port change invalidates the stored client and triggers a re-register.
+# It is idempotent and self-validating: a stored registration is reused only
+# when it was minted for the CURRENT (domain, redirect URI) AND the issuer it
+# recorded still answers its discovery document. A domain or port change, or a
+# fleet that stopped serving the recorded name, re-registers automatically -
+# otherwise the console would fail at sign-in long after the change.
+# Design: group DESIGN.md §3.2.5 "pgAdmin console (dev operator surface)".
 #
 # WHY DCR AND NOT A COMMITTED SECRET: a client secret is a credential. A repo
 # that ships one ships a secret, and a dev box that pastes one into .env puts
@@ -78,37 +81,72 @@ say() { printf '[pgadmin-oidc] %s\n' "$*"; }
 OUT_DIR="${SENTIN8_REPO_ROOT:-$TREE_ROOT}/.run/pgadmin"
 OUT_FILE="$OUT_DIR/config_system.py"
 
-# ── Reuse an existing registration unless FORCE=1 ────────────────────────
+# ── Reuse an existing registration unless it is provably still valid ──────
 #
-# The stored registration is keyed to ONE domain and ONE redirect URI. A
-# domain switch or a port change invalidates it, so those are checked
-# before reuse - a stale client_id would fail at the token endpoint with
-# "invalid_client" long after the operator changed the domain.
+# A stored registration is only usable when BOTH checks pass:
+#
+#   1. DECLARATIVE - it was minted for this domain and this redirect URI. A
+#      domain switch or a port change invalidates it; without the check a
+#      stale client_id would surface as "invalid_client" at the token
+#      endpoint long after the operator changed the domain.
+#
+#   2. LIVE - the issuer recorded in the registration still answers its
+#      discovery document. The declarative check cannot see a fleet that
+#      stopped serving the name it was minted against (the observed
+#      `421 Misdirected Request` - the .env named the right domain while the
+#      process kept a config pointing at an older one). A non-200 here means
+#      the recorded client is dead to the running fleet, so re-register.
+#
+# `FORCE=1` skips both.
+reuse="0"
 if [[ "${FORCE:-0}" != "1" ]] && [[ -f "$OUT_DIR/sentin8-oidc-client.json" ]]; then
-  if python3 - "$OUT_DIR/sentin8-oidc-client.json" "$DOMAIN" "$REDIRECT_URI" <<'PY'
+  # Declarative check: minted for THIS domain and THIS redirect URI? A match
+  # also hands back the issuer it recorded, for the live probe below.
+  if recorded_base="$(python3 - "$OUT_DIR/sentin8-oidc-client.json" "$DOMAIN" "$REDIRECT_URI" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-ok = d.get("domain") == sys.argv[2] and d.get("redirect_uri") == sys.argv[3] and d.get("client_id")
-sys.exit(0 if ok else 1)
+if d.get("domain") == sys.argv[2] and d.get("redirect_uri") == sys.argv[3] and d.get("client_id"):
+    print(d.get("auth_base") or "")
+else:
+    sys.exit(1)
 PY
-  then
-    say "reusing the stored registration for domain '${DOMAIN}' (FORCE=1 to re-register)"
+)"; then
+    # Live probe: does the fleet still serve the issuer this client targets?
+    # Only the status matters - a 421 from the ingress means the host has no
+    # mapping, i.e. the fleet does not serve this name any more.
+    probe_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+      "${recorded_base}/.well-known/openid-configuration" 2>/dev/null || true)"
+    if [[ "$probe_status" == "200" ]]; then
+      say "reusing the stored registration for domain '${DOMAIN}' (issuer verified live; FORCE=1 to re-register)"
+      reuse="1"
+    else
+      say "stored issuer '${recorded_base}' answered '${probe_status:-no response}' - re-registering"
+      rm -f "$OUT_DIR/sentin8-oidc-client.json"
+    fi
   else
     say "stored registration is for a different domain/redirect - re-registering"
     rm -f "$OUT_DIR/sentin8-oidc-client.json"
   fi
 fi
 
-# ── Dynamic Client Registration (RFC 7591) ────────────────────────────────
-#
-# token_endpoint_auth_method=client_secret_basic: pgAdmin's authlib client
-# sends the secret with HTTP Basic at the token endpoint. A public client
-# (`none`) would also work, but the confidential form keeps the secret out
-# of the browser URL and matches what the platform already issues to `dash`.
-say "registering an OIDC client with ${AUTH_BASE}/oauth/register"
-say "  redirect_uri: ${REDIRECT_URI}"
+if [[ "$reuse" == "1" ]]; then
+  # Reuse means NO registration call at all: the stored registration already
+  # carries the client_id, secret and RFC 7592 token for this exact target.
+  # Skipping the call is the point - re-registering on every run would mint a
+  # new client per invocation (a DCR storm) and leave the console's old row
+  # behind with no reference to clean it up.
+  resp="$(cat "$OUT_DIR/sentin8-oidc-client.json")"
+else
+  # ── Dynamic Client Registration (RFC 7591) ──────────────────────────────
+  #
+  # token_endpoint_auth_method=client_secret_basic: pgAdmin's authlib client
+  # sends the secret with HTTP Basic at the token endpoint. A public client
+  # (`none`) would also work, but the confidential form keeps the secret out
+  # of the browser URL and matches what the platform already issues to `dash`.
+  say "registering an OIDC client with ${AUTH_BASE}/oauth/register"
+  say "  redirect_uri: ${REDIRECT_URI}"
 
-payload="$(python3 - "$REDIRECT_URI" <<'PY'
+  payload="$(python3 - "$REDIRECT_URI" <<'PY'
 import json, sys
 print(json.dumps({
     "client_name": "Sentin8 pgAdmin console",
@@ -121,24 +159,25 @@ print(json.dumps({
 PY
 )"
 
-# --resolve is unnecessary: the platform CA is trusted by the host store
-# (`make ca-trust`), and the domain resolves through DNS.
-resp="$(curl -fsS --max-time 20 \
-  -H 'content-type: application/json' \
-  -X POST "${AUTH_BASE}/oauth/register" \
-  --data-binary "$payload" 2>&1)" || {
-    echo "ERROR: dynamic client registration failed." >&2
-    echo "  endpoint: ${AUTH_BASE}/oauth/register" >&2
-    echo "  response: ${resp:-<empty>}" >&2
-    echo "  Is the platform fleet up and is the CA trusted (make ca-trust)?" >&2
-    exit 1
-  }
+  # --resolve is unnecessary: the platform CA is trusted by the host store
+  # (`make ca-trust`), and the domain resolves through DNS.
+  resp="$(curl -fsS --max-time 20 \
+    -H 'content-type: application/json' \
+    -X POST "${AUTH_BASE}/oauth/register" \
+    --data-binary "$payload" 2>&1)" || {
+      echo "ERROR: dynamic client registration failed." >&2
+      echo "  endpoint: ${AUTH_BASE}/oauth/register" >&2
+      echo "  response: ${resp:-<empty>}" >&2
+      echo "  Is the platform fleet up and is the CA trusted (make ca-trust)?" >&2
+      exit 1
+    }
+fi
 
 client_id="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_id"])')"
 client_secret="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("client_secret",""))')"
 
 if [[ -z "$client_id" ]]; then
-  echo "ERROR: registration returned no client_id." >&2
+  echo "ERROR: no client_id in the registration (fresh or stored)." >&2
   printf '%s\n' "$resp" >&2
   exit 1
 fi

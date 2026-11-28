@@ -317,6 +317,261 @@ re-handshake on reconnect; `pg_hba.conf`/`pg_ident.conf` changes arm on
 the next SIGHUP (every CLI write reloads), so rotation never needs a
 server restart.
 
+#### 3.2.5 pgAdmin console (dev operator surface - PGAUTH-1)
+
+pgAdmin 4 is an optional **convenience plane** in front of the SAME
+local PostgreSQL instance. It is never a data plane: it holds no
+authoritative state, and its removal changes nothing about the fleet. It
+is opt-in (`compose --profile pgadmin`, or `PGADMIN_DISABLE=1` to skip),
+runs loopback-only on `127.0.0.1:${PGADMIN_PORT:-5050}`, and carries no
+hostname, no CA leaf, and no DNS name.
+
+Two credentials exist and they are deliberately different:
+
+| Hop | Identity | Material |
+|---|---|---|
+| Browser → console | platform SSO (OpenID Connect authorization code) | DCR-registered client, minted per tree |
+| Console → PostgreSQL | certificate identity (§3.2) | `m2m-postgres-ops` leaf, `sslmode=verify-full` |
+
+There is **no static console password**. pgAdmin's image default
+(`AUTHENTICATION_SOURCES = ["internal"]`) is overridden by
+`config_system.py`, the LAST config layer
+(`evaluate_config`: `config_distro` → `config_local` → `config_system`).
+`SERVER_MODE` must be `True`, because pgAdmin registers the OAuth2 auth
+module only inside `if config.SERVER_MODE`; in desktop mode the OAuth2
+routes 404 and the static password is the only way in.
+
+##### The domain is derived, never stored
+
+`SENTIN8_DOMAIN` is the single source of truth and it lives in the
+tree-root `.env`. Three consumers read it and they must never diverge:
+
+1. `infra/pgadmin/pgadmin-oidc-login.sh` - performs DCR against
+   `https://auth.ops.sys.${SENTIN8_DOMAIN}/oauth/register` and writes
+   `.run/pgadmin/config_system.py` (0600) plus
+   `.run/pgadmin/sentin8-oidc-client.json`, both keyed to the domain and
+   redirect URI they were minted for.
+2. `docker-compose.yml` - receives `SENTIN8_DOMAIN` through
+   `--env-file ../.env` and uses it only for the auth-host route below.
+3. PostgreSQL itself - untouched; the console's DB name and role are
+   constants from §3.2.
+
+The generated registration is **invalidated in two independent ways**, so
+a domain switch can never silently leave a dead client behind:
+
+- **Declarative guard** - the stored `sentin8-oidc-client.json` records
+  `domain` and `redirect_uri`; a mismatch re-registers.
+- **Live issuer probe** - before reuse the script fetches the stored
+  `auth_base`'s `/.well-known/openid-configuration`; any non-200
+  re-registers. This is what catches the case the declarative guard
+  cannot see: the `.env` still names the RIGHT domain, but the fleet (or
+  the stale org-domain rows) does not serve it any more.
+
+##### Why the auth host needs an explicit route (the split that bit us)
+
+The dev wildcard zone maps `*.local.sentin8.dev` to `127.0.0.1`.
+That is correct for the HOST, and wrong for a container, where
+`127.0.0.1` is the container's own loopback:
+
+```
+host:      auth.ops.sys.local.sentin8.dev -> 127.0.0.1      (ingress :443)
+container: auth.ops.sys.local.sentin8.dev -> 127.0.0.1      (itself - refused)
+```
+
+The SSO round trip straddles both worlds, so each half resolves
+differently:
+
+```mermaid
+graph TD
+    subgraph host["HOST (operator's browser + ingress)"]
+        B["Browser<br/>127.0.0.1:5050"]
+        P["sentin8-proxy :443<br/>SNI router"]
+        A["sentin8-auth<br/>auth.ops.sys.DOMAIN"]
+        P -->|"SNI + L7 mapping"| A
+    end
+    subgraph container["CONTAINER sentin8-pgadmin (bridge netns)"]
+        PG["pgAdmin 4<br/>discovery + token + userinfo"]
+    end
+    B -->|"GET /oauth2/authorize"| PG
+    B -->|"302 to authorize URL (host DNS)"| P
+    PG -->|"token / userinfo<br/>extra_hosts: DOMAIN -> host-gateway"| P
+    PG -->|"hostssl cert identity<br/>postgres:5432"| D[("PostgreSQL")]
+```
+
+The container's outbound auth calls therefore require an explicit
+`extra_hosts` entry pointing the auth host at the docker host gateway.
+Compose renders it from the same `SENTIN8_DOMAIN`, and the interpolation
+is written in required form (`${SENTIN8_DOMAIN:?...}`) so a missing
+`.env` fails the compose run loudly instead of emitting a hostless entry
+that 421s at sign-in.
+
+`REQUESTS_CA_BUNDLE` + `SSL_CERT_FILE` point pgAdmin's outbound client
+at a generated bundle (certifi's public roots plus this fleet's root and
+intermediate). Without it, discovery fails with "self-signed certificate
+in certificate chain", because authlib/requests validate against certifi,
+which has never heard of the platform CA.
+
+##### Request lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as Operator browser
+    participant PG as pgAdmin (container)
+    participant Proxy as sentin8-proxy (:443)
+    participant Auth as sentin8-auth
+    participant DB as PostgreSQL
+
+    Op->>PG: GET http://127.0.0.1:5050/authenticate/login
+    PG->>PG: pick "Sentin8" from OAUTH2_CONFIG
+    PG-->>Op: 302 https://auth.ops.sys.DOMAIN/oauth/authorize?...
+    Op->>Proxy: GET /oauth/authorize (host DNS -> 127.0.0.1)
+    Proxy->>Auth: SNI auth.ops.sys.DOMAIN
+    Auth-->>Op: sign-in page, then 302 to redirect_uri
+    Op->>PG: GET /oauth2/authorize?code=...
+    Note over PG: server-side token exchange starts here
+    PG->>Proxy: POST /oauth/token (extra_hosts -> host-gateway)
+    alt auth host reachable and serving this domain
+        Proxy->>Auth: POST /oauth/token
+        Auth-->>PG: access_token + id_token
+        PG->>Proxy: GET /oauth/userinfo
+        Proxy->>Auth: GET /oauth/userinfo
+        Auth-->>PG: email claim
+        PG->>DB: hostssl cert identity (verify-full)
+        DB-->>PG: session established
+        PG-->>Op: console
+    else auth host unreachable or wrong domain (421 / refused)
+        Proxy-->>PG: 421 Misdirected Request (no mapping for host)
+        PG-->>Op: SSO error - regenerate with make infra-pgadmin
+    end
+```
+
+##### Failure modes
+
+| Symptom | Cause | Recovery |
+|---|---|---|
+| `421 Misdirected Request` on discovery | stale generated domain, or org-domain rows still naming an old domain | `make infra-pgadmin` (probe re-registers) |
+| `Connection refused` on token exchange | container cannot reach the ingress by name | compose `extra_hosts` host-gateway route |
+| "self-signed certificate in certificate chain" | CA bundle missing the platform root | `make infra-pgadmin` rewrites `ca-bundle.pem` |
+| OAuth2 button absent, password-only login | `SERVER_MODE` not `True` | compose env `PGADMIN_CONFIG_SERVER_MODE` |
+| `PermissionError: /var/lib/pgadmin/pgadmin4.db`, restart loop | volume owned by a foreign uid (the image runs as uid 5050) | `make infra-pgadmin` re-chowns to the image's uid |
+| `invalid_client` at the token endpoint | stored client belongs to another domain | `make infra-pgadmin-sso-reset` |
+| `invalid_request: PAR is required` | the env's security profile is a FAPI posture (open question below) | not yet resolvable from the console |
+
+##### Open question - the console cannot satisfy a FAPI env posture
+
+The platform seeds `auth.security_profiles` with `scope='platform'` at
+`fapi_2`: `require_par`, `require_jarm`, `require_dpop`, `require_pkce` and
+`require_iss` all true, and `signing_alg='MLDSA65'`. A plain OIDC relying
+party cannot meet that. The authorize endpoint's answer is therefore
+standards-correct, not a defect:
+
+```
+GET /oauth/authorize?response_type=code&client_id=...&redirect_uri=...
+  -> invalid_request: PAR is required - provide a request_uri from /oauth/par
+```
+
+Three measured constraints decide the resolution:
+
+1. **PAR is mandatory for every interactive client, first-party included.**
+   The seeded first-party `dash` client (public, `dpop_exempt=true`,
+   `sender_constrain=any`) receives the same reject. So PAR is not a
+   third-party concern the console could be exempted from without becoming
+   less compliant than the platform's own dashboard.
+2. **pgAdmin verifies the id_token signature** (`_authorize_access_token`:
+   "the OAuth server will return an id_token that pgAdmin must verify") and
+   its bundled **authlib 1.9.1 has no ML-DSA support** - no ML-DSA JWS
+   algorithm and no ML-DSA key type. An ML-DSA-65 id_token can never verify
+   there, at any posture.
+3. **`resolve_security_profile` resolves env → org → platform** and
+   `PUT /v1/security-profile` already upserts the env-scoped row. But that
+   handler does NOT write `signing_alg` - the column defaults to
+   `'MLDSA65'` - so an env-scoped `standard` row relaxes PAR/JARM/DPoP/PKCE
+   while leaving the token family PQ.
+
+Constraint 3 is the decisive one, and it also exposes a live inconsistency
+worth its own story: `jwks.rs::active_signing_alg()` returns `RS256` when
+`SENTIN8_TLS_PQ_MODE=classical`, yet the seeded platform row pins
+`signing_alg='MLDSA65'` and the published JWKS is ML-DSA only. On this
+`classical` fleet the profile overrides the mode-derived default.
+
+##### Resolution
+
+**A dedicated console environment does NOT work - identity is env-scoped.**
+The earlier scoping proposed a console env with a relaxed profile. That is
+invalid on three measured facts:
+
+1. `auth.users` is env-scoped (`env_id UUID NOT NULL`) behind RLS.
+2. The hosted sign-in resolves the user by BOTH email and the
+   hostname-derived env (`login_submit`:
+   `WHERE email = $1 AND env_id = $2`, env from
+   `resolve_tenant_from_headers`).
+3. Every operator lives in the platform env: the live fleet holds ~202
+   users under `…0002` and two per tenant env. A console host under its
+   own env would therefore find NO operator - each one would have to be
+   provisioned AGAIN into the console env, fragmenting the identity that
+   "a user is a user" is built on.
+
+The token-family half of the earlier reasoning is also obsolete. AUTHSEED-1
+made the empty `signing_alg` inherit the deployment mode, so on a
+`classical` fleet the id_token is already RS256 and authlib verifies it.
+A relaxed POSTURE no longer implies a PQ token.
+
+**What is required is a registration-scoped posture exemption.** The
+platform already establishes exactly this pattern: `oauth_clients.
+sender_constrain` is documented as "REGISTRATION-SCOPED, not env-scoped",
+and `oauth_clients.dpop_exempt` waives a profile gate for ONE
+first-party client.
+
+##### Implemented resolution (PGAUTH-2)
+
+`oauth_clients.par_exempt` (BOOLEAN, DEFAULT false) is the registration-
+scoped PAR exemption. It is consulted at exactly two gates:
+
+| Gate | Site | Exempt behaviour |
+|---|---|---|
+| PAR mandate | `authorize` (`missing_par`) | the reject is skipped for this client |
+| FAPI auth-method allow-list | token mint (`is_auth_method_allowed`) | the console's credential shape is admitted |
+
+Only PAR and the auth-method allow-list are waived, because only those
+two are genuinely impossible for the console:
+
+| Gate | Console capability | Verdict |
+|---|---|---|
+| PAR (`require_par`) | authlib 1.9.1 carries no pushed-request helper | waived |
+| auth method (FAPI allow-list) | the console holds a client secret, which `fapi_2` rejects | waived |
+| JARM (`require_jarm`) | only wraps when `response_mode=jwt`, which the console never sends | untouched |
+| DPoP (`require_dpop`) | already waived by `dpop_exempt` for a public client | untouched |
+| PKCE (`require_pkce`) | pgAdmin supports it (`OAUTH2_CHALLENGE_METHOD=S256`) | stays REQUIRED |
+| `require_iss` | the console ignores the extra `iss` parameter | untouched |
+
+Hardening, mirroring `dpop_exempt`:
+
+- **Not settable through DCR.** The flag has no `RegisterRequest` member,
+  so a self-registered client can never relax the posture it is judged by.
+- **Written only by a privileged surface.**
+  `POST /v1/admin/provision/oauth_client_exempt` requires the
+  provisioning scope, targets an EXISTING client, and flips flags - it
+  never creates one.
+- **Named gates only.** The exemption does not disable the posture; it
+  names PAR and the auth-method allow-list, so a future posture flag is
+  not silently inherited.
+
+Verified live on the `classical` dev fleet: the exempt console client
+authorize returns `302 -> /sign-in` (proceed) while the non-exempt `dash`
+client still returns the `PAR is required` error redirect.
+
+##### Invariants
+
+1. No static console credential exists in the repo or in `.env`.
+2. The console domain always equals `SENTIN8_DOMAIN` from the tree-root
+   `.env`; no script, compose file, or generated file may name a domain
+   literal.
+3. Generated state lives only under `.run/pgadmin/` (gitignored runtime
+   state), never in a tracked file.
+4. The console is reachable only on host loopback; it is never routed
+   through the ingress.
+
 ### 3.3 The core appliance profile (COREAP - dev/test split-plane)
 
 The dev split-plane: the platform core (the 17 services) runs in ONE

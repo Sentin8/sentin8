@@ -68,6 +68,13 @@ stamp_env = SENTIN8_BUILD_PROFILE=$(if $(RELEASE),release,debug) SENTIN8_GIT_SHA
 RUNDIR := $(abspath ..)/.run
 RUNDIR_ENV := SENTIN8_RUN_DIR=$(RUNDIR) SENTIN8_LOG_DIR=$(RUNDIR)/logs SENTIN8_CAPTAIN_SOCK=$(RUNDIR)/captain.sock
 
+# Compose input: the group folder carries NO `.env`, so `docker compose`
+# would otherwise load ZERO variables and any required interpolation
+# (the pgadmin auth-host route, DESIGN §3.2.5) would fail. Every compose
+# call against docker-compose.yml goes through this variable so the
+# operator .env at the TREE ROOT is always the one input.
+COMPOSE := docker compose --env-file $(abspath ..)/.env
+
 # Base targets that take the *-release / *-debug suffixed wrapper forms.
 PROFILED := build start stop status
 
@@ -253,7 +260,7 @@ infra-up: ## Dev infra plane: compose up (postgres + valkey; fresh volumes = fre
 	@for vol in sentin8_sentin8-pgdata sentin8_sentin8-valkeydata; do \
 		docker run --rm -v $$vol:/d alpine chown -R 1000:1000 /d 2>/dev/null || true; \
 	done
-	docker compose up -d postgres valkey
+	$(COMPOSE) up -d postgres valkey
 	@if [ "$${PGADMIN_DISABLE:-0}" != "1" ]; then \
 		$(MAKE) --no-print-directory infra-pgadmin; \
 	fi
@@ -278,12 +285,18 @@ infra-pgadmin: ## Dev infra: bring up the pgAdmin 4 console (SSO) on 127.0.0.1:5
 			exit 1; \
 		}; \
 	fi
-	@for vol in sentin8_sentin8-pgadmin; do \
-		docker run --rm -v $$vol:/d alpine:3 chown -R 1000:1000 /d 2>/dev/null || true; \
-	done
+	@# The console image runs as a NON-ROOT uid (`USER 5050`, gid 0), so a
+	@# volume created root-owned by docker is unwritable - the first boot dies
+	@# on `PermissionError: /var/lib/pgadmin/pgadmin4.db`. The owner must be
+	@# the IMAGE's uid, never a literal: chowning to the host operator's uid
+	@# (1000) locks the console out of its own database, because it still runs
+	@# as 5050. Derived here so a tag bump cannot drift (DESIGN §3.2.5).
+	@uid=$$(docker image inspect dpage/pgadmin4:9 --format '{{.Config.User}}' 2>/dev/null | cut -d: -f1); \
+	docker run --rm -v sentin8_sentin8-pgadmin:/d alpine:3 \
+		chown -R "$${uid:-0}:0" /d 2>/dev/null || true
 	@port=$${PGADMIN_PORT:-$$(grep -h '^PGADMIN_PORT=' ../.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')}; \
 	echo "→ pgAdmin 4: http://127.0.0.1:$${port:-5050}/  (loopback only - sign in with your Sentin8 account)"
-	docker compose --profile pgadmin up -d --force-recreate pgadmin
+	$(COMPOSE) --profile pgadmin up -d --force-recreate pgadmin
 
 infra-pgadmin-sso-reset: ## Dev infra: re-register the console's OIDC client (after a domain/port change)
 	@FORCE=1 ./infra/pgadmin/pgadmin-oidc-login.sh
@@ -292,7 +305,7 @@ infra-pgadmin-sso-reset: ## Dev infra: re-register the console's OIDC client (af
 # servers.json is read ONCE, when the pgadmin volume is empty. Changing the
 # pre-registered server (host, cert paths, sslmode) needs this.
 infra-reset-pgadmin: ## Dev infra: wipe pgAdmin state so servers.json is re-read
-	docker compose rm -sf pgadmin 2>/dev/null || true
+	$(COMPOSE) rm -sf pgadmin 2>/dev/null || true
 	docker volume rm -f sentin8_sentin8-pgadmin 2>/dev/null || true
 	@echo "pgAdmin state wiped - the next 'make infra-pgadmin' re-reads infra/pgadmin/servers.json."
 
@@ -328,8 +341,8 @@ http80-down: ## Dev host: remove the :80 sidecar
 	@docker rm -f sentin8-http80 >/dev/null 2>&1 && echo "removed :80 sidecar" || echo "no sidecar running"
 
 infra-down: ## Dev infra plane: compose down (volumes KEPT; infra stays warm)
-	docker compose --profile pgadmin stop postgres valkey pgadmin \
-		&& docker compose --profile pgadmin rm -f postgres valkey pgadmin
+	$(COMPOSE) --profile pgadmin stop postgres valkey pgadmin \
+		&& $(COMPOSE) --profile pgadmin rm -f postgres valkey pgadmin
 
 start: ## Start the PLATFORM fleet (core scope, STARTSCOPE-1; RELEASE=--release for release)
 	@test -f ../.env || { echo 'No ../.env — copy ../.env.example first.'; exit 1; }
