@@ -268,19 +268,25 @@ infra-up: ## Dev infra plane: compose up (postgres + valkey; fresh volumes = fre
 # pgAdmin 4 in front of the SAME PostgreSQL (see the pgadmin service's
 # header): a convenience console, loopback-only. Console sign-in is the
 # PLATFORM's SSO - there is no static password and no hardcoded domain.
-# `infra/pgadmin/pgadmin-oidc-login.sh` registers an OIDC client via DCR
-# against this tree's auth (SENTIN8_DOMAIN from the tree-root .env) and
-# writes .run/pgadmin/config_system.py, which pgAdmin loads as its FINAL
-# config layer - that is what replaces AUTHENTICATION_SOURCES=["internal"].
+#
+# The console does NOT speak OIDC itself. `sentin8-console-auth` runs the
+# whole FAPI 2.0 round trip (PAR + PKCE + DPoP) with the platform's own
+# relying-party library and asserts the operator's email to pgAdmin through
+# pgAdmin's `webserver` auth source - which is `fapi_2`-legal with NO
+# exemption, unlike the oauth2 source pgAdmin ships (its bundled authlib has
+# no PAR client). Design: sentin8-console-auth/DESIGN.md.
+#
 # Opt out of SSO with PGADMIN_OIDC_DISABLE=1 (the console then cannot sign
 # anyone in; it is a debugging switch, not a fallback).
-infra-pgadmin: ## Dev infra: bring up the pgAdmin 4 console (SSO) on 127.0.0.1:5050
+infra-pgadmin: ## Dev infra: bring up the pgAdmin 4 console (SSO) on 127.0.0.1:5051
 	@if [ "$${PGADMIN_OIDC_DISABLE:-0}" = "1" ]; then \
-		echo "PGADMIN_OIDC_DISABLE=1 - skipping the SSO registration"; \
+		echo "PGADMIN_OIDC_DISABLE=1 - skipping the console SSO seed"; \
 	else \
-		./infra/pgadmin/pgadmin-oidc-login.sh || { \
-			echo "ERROR: pgAdmin SSO registration failed." >&2; \
-			echo "  The console has no static password - without a client nobody can sign in." >&2; \
+		cd sentin8-console-auth && SQLX_OFFLINE=true $(CARGO) build --quiet --bin sentin8-console-auth && cd .. || { \
+			echo "ERROR: could not build the console-auth front." >&2; exit 1; }; \
+		./sentin8-console-auth/scripts/seed.sh || { \
+			echo "ERROR: console SSO seed failed." >&2; \
+			echo "  The console has no static password - without a registration nobody can sign in." >&2; \
 			echo "  Is the fleet up (make start) and the CA trusted (make ca-trust)?" >&2; \
 			exit 1; \
 		}; \
@@ -294,12 +300,12 @@ infra-pgadmin: ## Dev infra: bring up the pgAdmin 4 console (SSO) on 127.0.0.1:5
 	@uid=$$(docker image inspect dpage/pgadmin4:9 --format '{{.Config.User}}' 2>/dev/null | cut -d: -f1); \
 	docker run --rm -v sentin8_sentin8-pgadmin:/d alpine:3 \
 		chown -R "$${uid:-0}:0" /d 2>/dev/null || true
-	@port=$${PGADMIN_PORT:-$$(grep -h '^PGADMIN_PORT=' ../.env 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r')}; \
-	echo "→ pgAdmin 4: http://127.0.0.1:$${port:-5050}/  (loopback only - sign in with your Sentin8 account)"
-	$(COMPOSE) --profile pgadmin up -d --force-recreate pgadmin
+	@port=$${CONSOLE_AUTH_PORT:-5051}; \
+	echo "→ pgAdmin console (SSO): http://127.0.0.1:$${port}/  (loopback only - sign in with your Sentin8 account)"
+	$(COMPOSE) --profile pgadmin up -d --build --force-recreate pgadmin console-auth
 
-infra-pgadmin-sso-reset: ## Dev infra: re-register the console's OIDC client (after a domain/port change)
-	@FORCE=1 ./infra/pgadmin/pgadmin-oidc-login.sh
+infra-pgadmin-sso-reset: ## Dev infra: re-register the console's OAuth client (after a domain/port change)
+	@FORCE=1 ./sentin8-console-auth/scripts/seed.sh
 	@$(MAKE) --no-print-directory infra-pgadmin
 
 # servers.json is read ONCE, when the pgadmin volume is empty. Changing the
