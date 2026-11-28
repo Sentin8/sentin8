@@ -303,6 +303,24 @@ infra-pgadmin: ## Dev infra: bring up the pgAdmin 4 console (SSO) on 127.0.0.1:5
 	@port=$${CONSOLE_AUTH_PORT:-5051}; \
 	echo "→ pgAdmin console (SSO): http://127.0.0.1:$${port}/  (loopback only - sign in with your Sentin8 account)"
 	$(COMPOSE) --profile pgadmin up -d --build --force-recreate pgadmin console-auth
+	@# Promote the configured operator to Administrator. pgAdmin's webserver
+	@# source auto-creates every sign-in as `User` (role 2), which cannot
+	@# manage the server - the browser reaches /browser/ and is bounced back
+	@# to login. `add-external-user --admin` is the supported surface and is
+	@# an idempotent UPSERT (it applies --admin even while printing "User
+	@# already exists"). Best-effort: a failure warns, the console still
+	@# signs in, only without server-manage rights.
+	@email=$$(grep -h '^CONSOLE_AUTH_ADMIN_EMAIL=' ../.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r'); \
+	email=$${email:-a@m.n}; \
+	if docker inspect sentin8-pgadmin >/dev/null 2>&1; then \
+		if docker exec sentin8-pgadmin /venv/bin/python /pgadmin4/setup.py \
+			add-external-user "$$email" --auth-source webserver --admin >/dev/null 2>&1; then \
+			echo "→ console admin promoted: $$email"; \
+		else \
+			echo "WARN: could not promote '$$email' (console still signs in as a non-admin User)." >&2; \
+			echo "      Promote by hand: docker exec sentin8-pgadmin /venv/bin/python /pgadmin4/setup.py add-external-user $$email --auth-source webserver --admin" >&2; \
+		fi; \
+	fi
 
 infra-pgadmin-sso-reset: ## Dev infra: re-register the console's OAuth client (after a domain/port change)
 	@FORCE=1 ./sentin8-console-auth/scripts/seed.sh
